@@ -92,3 +92,15 @@ def test_levels_differ_only_as_specified():
     f = BeliefTable.from_view(view, Level.FULL)
     # before any voids/imbalance exist, all levels agree
     np.testing.assert_allclose(u.probs, f.probs)
+
+
+def test_guessing_metrics_on_known_table():
+    from openhearts.eval.guessing import metrics_for
+    probs = np.zeros((3, 52))
+    probs[0, 10] = 0.5; probs[1, 10] = 0.3; probs[2, 10] = 0.2
+    probs[0, 11] = 1.0
+    truth = {10: 0, 11: 0}          # card -> true opponent index
+    p, nll, top1 = metrics_for(probs, truth)
+    np.testing.assert_allclose(p, (0.5 + 1.0) / 2)
+    np.testing.assert_allclose(nll, (-np.log(0.5) - np.log(1.0)) / 2)
+    np.testing.assert_allclose(top1, 1.0)
