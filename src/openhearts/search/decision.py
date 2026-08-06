@@ -43,10 +43,17 @@ def state_from_view(view: PlayerView, sampled_hands) -> GameState:
 
 
 class SearchPlayer:
-    def __init__(self, level: Level, n_samples: int, rng):
+    def __init__(self, level: Level, n_samples: int, rng,
+                 sampler_respects_voids: bool = True):
+        # sampler_respects_voids=False exists for one experiment only: the
+        # sampler normally refuses to deal a card into a suit its holder has
+        # shown void in, which leaks void evidence into EVERY belief level --
+        # including UNIFORM, whose table ignores voids. Turning it off gives a
+        # truly uninformed control for the ablation.
         self.level = level
         self.n_samples = n_samples
         self.rng = rng
+        self.sampler_respects_voids = sampler_respects_voids
         self.fallbacks = 0          # decisions that fell back to the heuristic
         self.failed_samples = 0     # arrangements the sampler could not build
         self._heuristic = HeuristicPlayer()
@@ -57,6 +64,10 @@ class SearchPlayer:
             return legal[0]
 
         table = BeliefTable.from_view(view, self.level)
+        if not self.sampler_respects_voids:
+            table = BeliefTable(table.probs, [set(), set(), set()],
+                                table.hand_sizes, table.opponent_seats,
+                                table.unseen_mask)
         arrangements = []
         for _ in range(self.n_samples):
             result = sample_arrangement(table, self.rng)

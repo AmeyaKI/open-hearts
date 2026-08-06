@@ -38,3 +38,13 @@ def test_single_legal_move_skips_search():
     leader = state.to_play
     view = state.view_for(leader)   # trick 0: only the 2c is legal
     assert bot.choose(view) == cards.TWO_CLUBS
+
+
+def test_noleak_search_player_completes_a_game_legally():
+    # sampler_respects_voids=False: the truly-uninformed ablation control.
+    rng = np.random.default_rng(13)
+    bot = SearchPlayer(Level.UNIFORM, n_samples=10, rng=rng,
+                       sampler_respects_voids=False)
+    others = [HeuristicPlayer() for _ in range(3)]
+    state = play_game(deal(rng), [bot] + others)
+    assert sum(state.scores) == 26
