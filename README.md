@@ -18,7 +18,7 @@ The table is 3 opponents x 52 cards, holding P(opponent i has card c). Two const
 - A card the observer can see (in their own hand, or already played) has probability 0 for every opponent.
 - Each opponent's row must sum to the number of cards they're still holding.
 
-**A worked example.** Say West leads a heart, and you (holding no hearts, so this trick doesn't reveal your own voids) are watching. Nobody was forced to follow — wait, let's use the real trigger: someone couldn't follow a heart lead. Concretely:
+**A worked example.** You are the observer, and the trigger is a player failing to follow suit. Concretely:
 
 - West leads a heart. North discards a club instead of following. That's a **void reveal**: North has zero hearts.
 - Before this: hearts were spread roughly evenly across North, East, and South's remaining hearts (since your own hand and played cards are zeroed out already).
