@@ -2,7 +2,7 @@
 name = "openhearts"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["numpy>=1.26", "matplotlib>=3.8"]
+dependencies = ["numpy>=1.26", "matplotlib>=3.8", "numba>=0.60"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

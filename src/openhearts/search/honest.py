@@ -34,7 +34,7 @@ exactly to Phase-1 `SearchPlayer`, drawing the identical rng stream, so old
 rows stay reproducible and the two can be compared on the same deals.
 """
 from openhearts.belief.table import BeliefTable, Level
-from openhearts.engine import cards
+from openhearts.engine import cards, kernel
 from openhearts.engine.state import GameState, PlayerView
 from openhearts.players.heuristic import HeuristicPlayer
 from openhearts.sampler.sampler import sample_arrangement
@@ -106,6 +106,22 @@ class HonestSearchPlayer:
         return best_card
 
     def _playout(self, state: GameState, our_seat: int) -> None:
+        if kernel.jit_enabled():
+            self._playout_jit(state, our_seat)
+            return
+        self._playout_python(state, our_seat)
+
+    def _playout_jit(self, state: GameState, our_seat: int) -> None:
+        # Same three segments as the Python loop, with the two heuristic-only
+        # stretches handed to the compiled kernel: run to our first real
+        # decision, re-determinize there in Python, then finish.
+        if self.n_inner > 0:
+            if kernel.run_playout_until_decision(state, our_seat):
+                state.play(self._inner.choose(state.view_for(our_seat)))
+        kernel.run_playout(state)
+
+    def _playout_python(self, state: GameState, our_seat: int) -> None:
+        # Reference implementation, kept live for OPENHEARTS_NO_JIT=1.
         # `intercepted` is deliberately a local: the one re-determinization is
         # per (world x candidate) playout, not per decision or per player.
         intercepted = self.n_inner <= 0

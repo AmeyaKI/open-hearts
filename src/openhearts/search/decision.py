@@ -13,7 +13,7 @@ same heuristic as the real opponents -- a perfect opponent model, which
 flatters the bot relative to real-world play.
 """
 from openhearts.belief.table import BeliefTable, Level
-from openhearts.engine import cards
+from openhearts.engine import cards, kernel
 from openhearts.engine.state import GameState, PlayerView
 from openhearts.players.heuristic import HeuristicPlayer
 from openhearts.sampler.sampler import sample_arrangement
@@ -96,6 +96,15 @@ class SearchPlayer:
         return best_card
 
     def _playout(self, state: GameState) -> None:
+        if kernel.jit_enabled():
+            kernel.run_playout(state)
+            return
+        self._playout_python(state)
+
+    def _playout_python(self, state: GameState) -> None:
+        # Reference implementation; the numba kernel is an exact port of it
+        # (tests/test_kernel_equivalence.py pins the two together). Kept as
+        # live code so OPENHEARTS_NO_JIT=1 has something to run.
         players = [self._heuristic] * 4
         while not state.is_over():
             seat = state.to_play
