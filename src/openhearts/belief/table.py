@@ -13,7 +13,7 @@ from enum import Enum
 
 import numpy as np
 
-from openhearts.engine import cards
+from openhearts.engine import cards, kernel
 from openhearts.engine.state import PlayerView
 
 
@@ -33,55 +33,71 @@ class BeliefTable:
 
     @classmethod
     def from_view(cls, view: PlayerView, level: Level) -> "BeliefTable":
-        opponent_seats = [(view.seat + 1 + i) % 4 for i in range(3)]
-
-        seen = view.hand
-        all_plays = list(view.history) + list(view.current_trick)
-        for _, c in all_plays:
-            seen |= cards.bit(c)
-        unseen_mask = cards.FULL_DECK & ~seen
-
-        # how many cards each opponent still holds
-        played_count = {s: 0 for s in range(4)}
-        for s, _ in all_plays:
-            played_count[s] += 1
-        hand_sizes = [13 - played_count[s] for s in opponent_seats]
-
-        # voids: failed to follow the led suit => none of that suit, ever
-        voids = [set(), set(), set()]
-        trick = []
-        for s, c in all_plays:
-            if trick and cards.suit(c) != cards.suit(trick[0][1]):
-                if s in opponent_seats:
-                    voids[opponent_seats.index(s)].add(
-                        cards.suit(trick[0][1])
-                    )
-            trick.append((s, c))
-            if len(trick) == 4:
-                trick = []
-        # NOTE: view.current_trick is included in the scan; a partial trick
-        # still reveals voids for those who already played to it.
-
-        probs = np.zeros((3, 52))
-        for c in cards.cards_in(unseen_mask):
-            probs[:, c] = 1.0
-
-        if level in (Level.VOIDS, Level.FULL):
-            for i in range(3):
-                for s in voids[i]:
-                    probs[i, 13 * s: 13 * s + 13] = 0.0
-
-        # guard: every unseen card must have at least one possible holder
-        col = probs.sum(axis=0)
-        for c in cards.cards_in(unseen_mask):
-            assert col[c] > 0, f"card {c} has no possible holder (bad zeroing)"
+        probs, voids, hand_sizes, opponent_seats, unseen_mask = _build_raw(
+            view, level)
 
         if level == Level.FULL:
-            probs = _rebalance(probs, hand_sizes, unseen_mask)
+            if kernel.jit_enabled():
+                probs = kernel.rebalance(probs, hand_sizes, unseen_mask)
+            else:
+                probs = _rebalance(probs, hand_sizes, unseen_mask)
         else:
+            col = probs.sum(axis=0)
             probs /= np.where(col > 0, col, 1.0)  # columns sum to 1
 
         return cls(probs, voids, hand_sizes, opponent_seats, unseen_mask)
+
+
+def _build_raw(view: PlayerView, level: Level):
+    """Everything `from_view` does before the level-specific normalisation.
+
+    Split out so the JIT-equivalence tests can feed both `_rebalance`
+    implementations the exact same pre-rebalance input.
+    """
+    opponent_seats = [(view.seat + 1 + i) % 4 for i in range(3)]
+
+    seen = view.hand
+    all_plays = list(view.history) + list(view.current_trick)
+    for _, c in all_plays:
+        seen |= cards.bit(c)
+    unseen_mask = cards.FULL_DECK & ~seen
+
+    # how many cards each opponent still holds
+    played_count = {s: 0 for s in range(4)}
+    for s, _ in all_plays:
+        played_count[s] += 1
+    hand_sizes = [13 - played_count[s] for s in opponent_seats]
+
+    # voids: failed to follow the led suit => none of that suit, ever
+    voids = [set(), set(), set()]
+    trick = []
+    for s, c in all_plays:
+        if trick and cards.suit(c) != cards.suit(trick[0][1]):
+            if s in opponent_seats:
+                voids[opponent_seats.index(s)].add(
+                    cards.suit(trick[0][1])
+                )
+        trick.append((s, c))
+        if len(trick) == 4:
+            trick = []
+    # NOTE: view.current_trick is included in the scan; a partial trick
+    # still reveals voids for those who already played to it.
+
+    probs = np.zeros((3, 52))
+    for c in cards.cards_in(unseen_mask):
+        probs[:, c] = 1.0
+
+    if level in (Level.VOIDS, Level.FULL):
+        for i in range(3):
+            for s in voids[i]:
+                probs[i, 13 * s: 13 * s + 13] = 0.0
+
+    # guard: every unseen card must have at least one possible holder
+    col = probs.sum(axis=0)
+    for c in cards.cards_in(unseen_mask):
+        assert col[c] > 0, f"card {c} has no possible holder (bad zeroing)"
+
+    return probs, voids, hand_sizes, opponent_seats, unseen_mask
 
 
 def _rebalance(probs, hand_sizes, unseen_mask,

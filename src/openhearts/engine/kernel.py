@@ -380,6 +380,168 @@ def sample_arrangements_batch(probs, void_suit_masks, hand_sizes,
 
 
 # --------------------------------------------------------------------------
+# belief rebalance (Phase 2.7)
+# --------------------------------------------------------------------------
+@njit(cache=True, inline="always")
+def _pairwise_sum(a):
+    """numpy's float64 reduction order for a contiguous 1-D block.
+
+    NOT a naive loop. numpy sums a contiguous float64 axis with the
+    8-accumulator pairwise scheme below, and a naive left-to-right loop
+    disagrees in the last bits on roughly half of realistic belief rows
+    (measured: 11100/20000). Since Phase 2.7 demands BITWISE equality with the
+    Python reference, the order is reproduced exactly. numba's own `a.sum()`
+    is naive and must not be substituted here.
+
+    Only the `n <= 128` branch of numpy's `pairwise_sum` is reproduced: rows
+    here are always 52 long and columns always 3. `_rebalance_kernel` asserts
+    the row length so a future caller cannot silently escape that range.
+    """
+    n = a.shape[0]
+    if n < 8:
+        res = 0.0
+        for i in range(n):
+            res += a[i]
+        return res
+    r0 = a[0]
+    r1 = a[1]
+    r2 = a[2]
+    r3 = a[3]
+    r4 = a[4]
+    r5 = a[5]
+    r6 = a[6]
+    r7 = a[7]
+    i = 8
+    lim = n - (n % 8)
+    while i < lim:
+        r0 += a[i]
+        r1 += a[i + 1]
+        r2 += a[i + 2]
+        r3 += a[i + 3]
+        r4 += a[i + 4]
+        r5 += a[i + 5]
+        r6 += a[i + 6]
+        r7 += a[i + 7]
+        i += 8
+    res = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))
+    while i < n:
+        res += a[i]
+        i += 1
+    return res
+
+
+@njit(cache=True)
+def _rebalance_kernel(probs, sizes, unseen_cols, tol, coarse_tol,
+                      coarse_after, max_iters):
+    """Exact port of `belief.table._rebalance`; see that docstring.
+
+    Returns `(probs, status, dev, n_iters)`. status 0 = converged,
+    1 = a column collapsed to zero, 2 = did not converge, 3 = the final
+    [0, 1+1e-9] bound was violated. The adapter turns 1/2/3 into the same
+    AssertionErrors the Python version raises.
+
+    Operation order is load-bearing and mirrors the reference line for line:
+    row sums -> row scale -> multiply -> unseen column sums -> divide ->
+    deviation. No reassociation, no fastmath.
+    """
+    n_rows = probs.shape[0]
+    n_cols = probs.shape[1]
+    k_unseen = unseen_cols.shape[0]
+    dev = 0.0
+    n_iters = 0
+    row = np.zeros(n_rows, dtype=np.float64)
+    col = np.zeros(k_unseen, dtype=np.float64)
+    converged = False
+    for k in range(max_iters):
+        n_iters = k + 1
+        for i in range(n_rows):
+            row[i] = _pairwise_sum(probs[i])
+        for i in range(n_rows):
+            if row[i] > 0.0:
+                scale = sizes[i] / row[i]
+            else:
+                scale = 1.0
+            for c in range(n_cols):
+                probs[i, c] = probs[i, c] * scale
+        for j in range(k_unseen):
+            c = unseen_cols[j]
+            # 3-row reduction: numpy's axis-0 order is sequential by row
+            s = probs[0, c]
+            for i in range(1, n_rows):
+                s += probs[i, c]
+            col[j] = s
+            if not (s > 0.0):
+                return probs, 1, 0.0, n_iters
+        for j in range(k_unseen):
+            c = unseen_cols[j]
+            for i in range(n_rows):
+                probs[i, c] = probs[i, c] / col[j]
+        dev = 0.0
+        for i in range(n_rows):
+            d = abs(_pairwise_sum(probs[i]) - sizes[i])
+            if d > dev:
+                dev = d
+        for j in range(k_unseen):
+            c = unseen_cols[j]
+            s = probs[0, c]
+            for i in range(1, n_rows):
+                s += probs[i, c]
+            d = abs(s - 1.0)
+            if d > dev:
+                dev = d
+        if dev < tol or (k + 1 >= coarse_after and dev < coarse_tol):
+            converged = True
+            break
+    if not converged:
+        return probs, 2, dev, n_iters
+    for i in range(n_rows):
+        for c in range(n_cols):
+            if probs[i, c] < 0.0 or probs[i, c] > 1.0 + 1e-9:
+                return probs, 3, dev, n_iters
+    return probs, 0, dev, n_iters
+
+
+def _rebalance_call(probs, hand_sizes, unseen_mask, tol=1e-9,
+                    coarse_tol=1e-4, coarse_after=2000, max_iters=100000):
+    from openhearts.engine import cards as _cards  # local: avoids cycle
+
+    sizes = np.array(hand_sizes, dtype=float)
+    unseen_cols = np.array(_cards.cards_in(unseen_mask), dtype=np.int64)
+    if unseen_cols.size == 0:
+        return probs, 0, 0.0, 0  # matches the reference's early return
+    assert probs.shape == (3, 52)
+    # the reference rebinds `probs = probs * scale[:, None]` and so never
+    # writes through to the caller's array; the kernel scales in place, so
+    # copy first to keep that contract.
+    work = np.array(probs, dtype=np.float64, order="C", copy=True)
+    out, status, dev, n_iters = _rebalance_kernel(
+        work, sizes, unseen_cols, float(tol), float(coarse_tol),
+        int(coarse_after), int(max_iters))
+    if status == 1:
+        raise AssertionError("column collapsed to zero during rebalance")
+    if status == 2:
+        raise AssertionError(f"rebalance did not converge (dev={dev})")
+    if status == 3:
+        raise AssertionError()
+    return out, status, dev, n_iters
+
+
+def rebalance(probs, hand_sizes, unseen_mask, tol=1e-9, coarse_tol=1e-4,
+              coarse_after=2000, max_iters=100000):
+    """Compiled `belief.table._rebalance`, bitwise-identical to it."""
+    out, _s, _d, n = _rebalance_call(probs, hand_sizes, unseen_mask, tol,
+                                     coarse_tol, coarse_after, max_iters)
+    return probs if n == 0 else out
+
+
+def rebalance_iters(probs, hand_sizes, unseen_mask, tol=1e-9, coarse_tol=1e-4,
+                    coarse_after=2000, max_iters=100000):
+    """Passes the kernel needed to converge (diagnostic; used by tests)."""
+    return _rebalance_call(probs, hand_sizes, unseen_mask, tol, coarse_tol,
+                           coarse_after, max_iters)[3]
+
+
+# --------------------------------------------------------------------------
 # GameState <-> arrays adapter
 # --------------------------------------------------------------------------
 _ENABLED = None
