@@ -267,10 +267,17 @@ def _decisions_with(jit_on):
         out = []
         for seed in range(14):
             state = deal(np.random.default_rng(100 + seed))
+            # jit_sampler=False on both: this gate pins the PLAYOUT kernel
+            # against its Python reference, which requires an identical rng
+            # stream. The batch sampler (Phase 2.6) deliberately draws a
+            # different stream, so it is held out here and pinned separately
+            # in tests/test_jit_sampler.py.
             search = SearchPlayer(Level.FULL, 12,
-                                  np.random.default_rng(seed))
+                                  np.random.default_rng(seed),
+                                  jit_sampler=False)
             honest = HonestSearchPlayer(Level.FULL, n_outer=8, n_inner=4,
-                                        rng=np.random.default_rng(seed))
+                                        rng=np.random.default_rng(seed),
+                                        jit_sampler=False)
             for _ in range(11):
                 view = state.view_for(state.to_play)
                 if len(cards.cards_in(view.legal_moves)) > 1:

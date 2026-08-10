@@ -31,7 +31,9 @@ remain known limitations, not fixed here.
 
 `n_inner=0` disables re-determinization entirely: the player then reduces
 exactly to Phase-1 `SearchPlayer`, drawing the identical rng stream, so old
-rows stay reproducible and the two can be compared on the same deals.
+rows stay reproducible and the two can be compared on the same deals -- with
+`jit_sampler=False`, since the compiled batch sampler (Phase 2.6, the default
+here) deliberately draws a different, still deterministic, stream.
 """
 from openhearts.belief.table import BeliefTable, Level
 from openhearts.engine import cards, kernel
@@ -43,12 +45,18 @@ from openhearts.search.decision import SearchPlayer, state_from_view
 
 class HonestSearchPlayer:
     def __init__(self, level: Level, n_outer: int, n_inner: int, rng,
-                 sampler_respects_voids: bool = True):
+                 sampler_respects_voids: bool = True,
+                 jit_sampler: bool = True):
         self.level = level
         self.n_outer = n_outer
         self.n_inner = n_inner
         self.rng = rng
         self.sampler_respects_voids = sampler_respects_voids
+        # Unlike SearchPlayer, honest search defaults to the compiled batch
+        # sampler: it has no bitwise-pinned published rows to protect, and the
+        # sampler is its dominant cost. OPENHEARTS_NO_JIT=1 still forces the
+        # Python path.
+        self.jit_sampler = jit_sampler
         self.fallbacks = 0          # outer decisions that fell back to heuristic
         self.failed_samples = 0     # outer arrangements the sampler could not build
         self._heuristic = HeuristicPlayer()
@@ -58,7 +66,7 @@ class HonestSearchPlayer:
         self._inner = None
         if n_inner > 0:
             self._inner = SearchPlayer(level, n_inner, rng,
-                                       sampler_respects_voids)
+                                       sampler_respects_voids, jit_sampler)
 
     @property
     def inner_fallbacks(self) -> int:
@@ -78,14 +86,7 @@ class HonestSearchPlayer:
             table = BeliefTable(table.probs, [set(), set(), set()],
                                 table.hand_sizes, table.opponent_seats,
                                 table.unseen_mask)
-        arrangements = []
-        for _ in range(self.n_outer):
-            result = sample_arrangement(table, self.rng)
-            if result is None:
-                self.failed_samples += 1
-                continue
-            hands, _attempts = result
-            arrangements.append(hands)
+        arrangements = self._sample(table, self.n_outer)
 
         if len(arrangements) * 2 < self.n_outer:
             self.fallbacks += 1
@@ -104,6 +105,23 @@ class HonestSearchPlayer:
             if best_avg is None or avg < best_avg:
                 best_card, best_avg = card, avg
         return best_card
+
+    def _sample(self, table, n_samples: int):
+        """Same contract and counter semantics as SearchPlayer._sample."""
+        if self.jit_sampler and kernel.jit_enabled():
+            arrangements, n_failed = kernel.sample_arrangements(
+                table, self.rng, n_samples)
+            self.failed_samples += n_failed
+            return arrangements
+        arrangements = []
+        for _ in range(n_samples):
+            result = sample_arrangement(table, self.rng)
+            if result is None:
+                self.failed_samples += 1
+                continue
+            hands, _attempts = result
+            arrangements.append(hands)
+        return arrangements
 
     def _playout(self, state: GameState, our_seat: int) -> None:
         if kernel.jit_enabled():

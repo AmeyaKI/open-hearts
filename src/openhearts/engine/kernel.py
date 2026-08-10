@@ -302,6 +302,84 @@ def playout_until_decision(hands, to_play, played_mask, trick_cards,
 
 
 # --------------------------------------------------------------------------
+# batch arrangement sampler (Phase 2.6)
+# --------------------------------------------------------------------------
+@njit(cache=True)
+def sample_arrangements_batch(probs, void_suit_masks, hand_sizes,
+                              unseen_cards, n_samples, max_restarts, seed):
+    """Draw `n_samples` arrangements of `unseen_cards` among 3 opponents.
+
+    Exact algorithmic port of `sampler.sample_arrangement`, batched: walk the
+    unseen cards in ascending order, pick a holder with probability
+    proportional to `probs[:, c]` after zeroing opponents who are full or void
+    in that suit, restart the whole arrangement on a dead end, give up after
+    `max_restarts`. `void_suit_masks[i]` has bit s set when opponent i is void
+    in suit s (kept separate from `probs` because UNIFORM tables do not encode
+    voids, and one experiment disables void-respecting sampling entirely).
+
+    Returns (hands[n_samples, 3], attempts[n_samples], n_success); only the
+    first `n_success` rows are filled. Failures are simply not emitted, which
+    is what the callers' `failed_samples` counter counts.
+    """
+    np.random.seed(seed)
+    k = unseen_cards.shape[0]
+    hands_out = np.zeros((n_samples, 3), dtype=np.int64)
+    attempts_out = np.zeros(n_samples, dtype=np.int64)
+    remaining = np.zeros(3, dtype=np.int64)
+    w = np.zeros(3, dtype=np.float64)
+    hands = np.zeros(3, dtype=np.int64)
+    n_success = 0
+    for _s in range(n_samples):
+        ok = False
+        used = 0
+        for attempt in range(1, max_restarts + 1):
+            for i in range(3):
+                remaining[i] = hand_sizes[i]
+                hands[i] = 0
+            dead = False
+            for ci in range(k):
+                c = unseen_cards[ci]
+                suit = c // 13
+                total = 0.0
+                for i in range(3):
+                    wi = probs[i, c]
+                    if remaining[i] == 0 or ((void_suit_masks[i] >> suit) & 1):
+                        wi = 0.0
+                    w[i] = wi
+                    total += wi
+                if total <= 0.0:
+                    dead = True
+                    break
+                u = np.random.random() * total
+                acc = 0.0
+                pick = -1
+                for i in range(3):
+                    acc += w[i]
+                    if u < acc and w[i] > 0.0:
+                        pick = i
+                        break
+                if pick < 0:  # float rounding at the top of the range
+                    for i in range(2, -1, -1):
+                        if w[i] > 0.0:
+                            pick = i
+                            break
+                hands[pick] |= _ONE << c
+                remaining[pick] -= 1
+            if not dead and remaining[0] == 0 and remaining[1] == 0 \
+                    and remaining[2] == 0:
+                ok = True
+                used = attempt
+                break
+        if ok:
+            hands_out[n_success, 0] = hands[0]
+            hands_out[n_success, 1] = hands[1]
+            hands_out[n_success, 2] = hands[2]
+            attempts_out[n_success] = used
+            n_success += 1
+    return hands_out, attempts_out, n_success
+
+
+# --------------------------------------------------------------------------
 # GameState <-> arrays adapter
 # --------------------------------------------------------------------------
 _ENABLED = None
@@ -374,6 +452,37 @@ def run_playout(state) -> None:
         state.trick_number, scores, out_cards, out_seats)
     _write_back(state, hands, scores, tc, ts, tl, to_play, hb, tn,
                 out_cards, out_seats, n)
+
+
+def sample_arrangements(table, rng, n_samples: int, max_restarts: int = 200):
+    """Batch-sample a decision's arrangements with the compiled sampler.
+
+    Returns `(hands_list, n_failed)` where each entry of `hands_list` is a
+    `[int, int, int]` bitmask triple in `table.opponent_seats` order -- the
+    same shape `sampler.sample_arrangement` returns, so callers just swap the
+    loop for one call.
+
+    HONESTY NOTE: this is NOT bitwise-compatible with the Python sampler. It
+    takes ONE draw from the caller's Generator per decision and uses it to
+    seed numba's internal RNG, instead of consuming the Generator once per
+    card. Results are fully deterministic given the caller's rng state, but
+    they are a different stream. That is why `jit_sampler` defaults to False
+    on SearchPlayer: every existing bitwise-pinned row keeps the Python path.
+    """
+    from openhearts.engine import cards as _cards  # local: avoids import cycle
+
+    seed = int(rng.integers(2**63))
+    unseen = np.array(_cards.cards_in(table.unseen_mask), dtype=np.int64)
+    void_masks = np.array(
+        [sum(1 << s for s in table.voids[i]) for i in range(3)],
+        dtype=np.int64)
+    hand_sizes = np.array(table.hand_sizes, dtype=np.int64)
+    probs = np.ascontiguousarray(table.probs, dtype=np.float64)
+    hands, _attempts, n_ok = sample_arrangements_batch(
+        probs, void_masks, hand_sizes, unseen, n_samples, max_restarts, seed)
+    out = [[int(hands[j, 0]), int(hands[j, 1]), int(hands[j, 2])]
+           for j in range(n_ok)]
+    return out, n_samples - n_ok
 
 
 def run_playout_until_decision(state, stop_seat: int) -> bool:

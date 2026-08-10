@@ -44,7 +44,8 @@ def state_from_view(view: PlayerView, sampled_hands) -> GameState:
 
 class SearchPlayer:
     def __init__(self, level: Level, n_samples: int, rng,
-                 sampler_respects_voids: bool = True):
+                 sampler_respects_voids: bool = True,
+                 jit_sampler: bool = False):
         # sampler_respects_voids=False exists for one experiment only: the
         # sampler normally refuses to deal a card into a suit its holder has
         # shown void in, which leaks void evidence into EVERY belief level --
@@ -54,7 +55,11 @@ class SearchPlayer:
         self.n_samples = n_samples
         self.rng = rng
         self.sampler_respects_voids = sampler_respects_voids
-        self.fallbacks = 0          # decisions that fell back to the heuristic
+        # jit_sampler DEFAULTS FALSE on purpose: the batch sampler draws a
+        # different (still deterministic) rng stream, so every Phase-1 row and
+        # bitwise test keeps the Python reference sampler unless asked.
+        self.jit_sampler = jit_sampler
+        self.fallbacks = 0        # decisions that fell back to the heuristic
         self.failed_samples = 0     # arrangements the sampler could not build
         self._heuristic = HeuristicPlayer()
 
@@ -68,14 +73,7 @@ class SearchPlayer:
             table = BeliefTable(table.probs, [set(), set(), set()],
                                 table.hand_sizes, table.opponent_seats,
                                 table.unseen_mask)
-        arrangements = []
-        for _ in range(self.n_samples):
-            result = sample_arrangement(table, self.rng)
-            if result is None:
-                self.failed_samples += 1
-                continue
-            hands, _attempts = result
-            arrangements.append(hands)
+        arrangements = self._sample(table, self.n_samples)
 
         if len(arrangements) * 2 < self.n_samples:
             self.fallbacks += 1
@@ -94,6 +92,27 @@ class SearchPlayer:
             if best_avg is None or avg < best_avg:
                 best_card, best_avg = card, avg
         return best_card
+
+    def _sample(self, table, n_samples: int):
+        """`n_samples` arrangements; `failed_samples` counts the ones that
+        exhausted the sampler's restart cap. Identical counter semantics on
+        both paths. The JIT choice is made here, at call time, so
+        `reset_jit_enabled()` is always honoured.
+        """
+        if self.jit_sampler and kernel.jit_enabled():
+            arrangements, n_failed = kernel.sample_arrangements(
+                table, self.rng, n_samples)
+            self.failed_samples += n_failed
+            return arrangements
+        arrangements = []
+        for _ in range(n_samples):
+            result = sample_arrangement(table, self.rng)
+            if result is None:
+                self.failed_samples += 1
+                continue
+            hands, _attempts = result
+            arrangements.append(hands)
+        return arrangements
 
     def _playout(self, state: GameState) -> None:
         if kernel.jit_enabled():

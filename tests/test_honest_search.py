@@ -30,7 +30,10 @@ def test_reduces_to_phase1_when_inner_disabled():
         seat = state.to_play
         state.play(HeuristicPlayer().choose(state.view_for(seat)))
     view = state.view_for(state.to_play)
+    # jit_sampler=False: "identical rng stream to Phase 1" is inherently a
+    # Python-sampler property (the batch sampler seeds numba from one draw).
     a = HonestSearchPlayer(Level.FULL, n_outer=30, n_inner=0,
-                           rng=np.random.default_rng(7)).choose(view)
+                           rng=np.random.default_rng(7),
+                           jit_sampler=False).choose(view)
     b = SearchPlayer(Level.FULL, 30, np.random.default_rng(7)).choose(view)
     assert a == b
