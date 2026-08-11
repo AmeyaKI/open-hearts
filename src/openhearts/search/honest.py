@@ -29,13 +29,26 @@ Every later decision, ours and the opponents', is plain heuristic, and the
 opponents are still modelled by the exact policy they actually use. Those
 remain known limitations, not fixed here.
 
+Phase 3 (Task 9) adds an optional `posterior_factory`. When supplied, the
+OUTER worlds no longer come from the raw constraint sampler but from a
+`WeightedPosterior` -- worlds that survive being replayed against what the
+opponents ACTUALLY chose. That closes the pipeline: choice-aware inference ->
+honest search -> points. The INNER re-determinization deliberately stays
+constraint-based, and that is not a budget compromise: inside an imagined
+world the "observed" plays after our candidate are ones the playout itself
+invented, so auditing them would only measure how well the imagined world
+explains its own imagined plays. There is no choice evidence in there to read.
+
 `n_inner=0` disables re-determinization entirely: the player then reduces
 exactly to Phase-1 `SearchPlayer`, drawing the identical rng stream, so old
 rows stay reproducible and the two can be compared on the same deals -- with
 `jit_sampler=False`, since the compiled batch sampler (Phase 2.6, the default
 here) deliberately draws a different, still deterministic, stream.
 """
+import numpy as np
+
 from openhearts.belief.table import BeliefTable, Level
+from openhearts.belief.weighted import PosteriorCollapse
 from openhearts.engine import cards, kernel
 from openhearts.engine.state import GameState, PlayerView
 from openhearts.players.heuristic import HeuristicPlayer
@@ -46,7 +59,8 @@ from openhearts.search.decision import SearchPlayer, state_from_view
 class HonestSearchPlayer:
     def __init__(self, level: Level, n_outer: int, n_inner: int, rng,
                  sampler_respects_voids: bool = True,
-                 jit_sampler: bool = True):
+                 jit_sampler: bool = True,
+                 posterior_factory=None):
         self.level = level
         self.n_outer = n_outer
         self.n_inner = n_inner
@@ -57,8 +71,26 @@ class HonestSearchPlayer:
         # sampler is its dominant cost. OPENHEARTS_NO_JIT=1 still forces the
         # Python path.
         self.jit_sampler = jit_sampler
+        # `posterior_factory(view, rng) -> posterior`, where `posterior` has
+        # `.worlds` (a list of 3-element lists of CURRENT-hand bitmasks, in
+        # BeliefTable.opponent_seats order -- exactly what the sampler
+        # returns) and `.weights` (one float per world). None keeps the
+        # Phase-2 behaviour bitwise: no extra rng is drawn, no extra branch
+        # is taken.
+        self.posterior_factory = posterior_factory
         self.fallbacks = 0          # outer decisions that fell back to heuristic
         self.failed_samples = 0     # outer arrangements the sampler could not build
+        # Decisions where the posterior found no surviving world and we fell
+        # back to the constraint sampler. The plan's truth-safety rule calls
+        # all-worlds-dead "a loud error, never a silent fallback": the
+        # fallback here is deliberate but NOT silent -- it is counted, and
+        # every experiment using it reports the count.
+        self.posterior_collapses = 0
+        # Decisions served by the posterior, and total worlds it supplied
+        # (so a run can report the realised worlds/decision, which is <=
+        # n_outer whenever the posterior ran out of draws).
+        self.posterior_decisions = 0
+        self.posterior_worlds = 0
         self._heuristic = HeuristicPlayer()
         # The inner evaluation is Phase-1 search, reused verbatim. It shares
         # our rng, so it must not exist at all when disabled: with n_inner=0
@@ -81,16 +113,25 @@ class HonestSearchPlayer:
         if len(legal) == 1:
             return legal[0]
 
-        table = BeliefTable.from_view(view, self.level)
-        if not self.sampler_respects_voids:
-            table = BeliefTable(table.probs, [set(), set(), set()],
-                                table.hand_sizes, table.opponent_seats,
-                                table.unseen_mask)
-        arrangements = self._sample(table, self.n_outer)
+        arrangements = None
+        if self.posterior_factory is not None:
+            arrangements = self._posterior_worlds(view)
 
-        if len(arrangements) * 2 < self.n_outer:
-            self.fallbacks += 1
-            return self._heuristic.choose(view)
+        if arrangements is None:
+            table = BeliefTable.from_view(view, self.level)
+            if not self.sampler_respects_voids:
+                table = BeliefTable(table.probs, [set(), set(), set()],
+                                    table.hand_sizes, table.opponent_seats,
+                                    table.unseen_mask)
+            arrangements = self._sample(table, self.n_outer)
+
+            # This guard belongs to the SAMPLER only. A short posterior
+            # return is not a degenerate draw: 20 choice-consistent worlds
+            # are better evidence than 50 merely constraint-consistent ones,
+            # and far better than punting to the heuristic.
+            if len(arrangements) * 2 < self.n_outer:
+                self.fallbacks += 1
+                return self._heuristic.choose(view)
 
         base_score = view.scores[view.seat]
         best_card, best_avg = None, None
@@ -105,6 +146,55 @@ class HonestSearchPlayer:
             if best_avg is None or avg < best_avg:
                 best_card, best_avg = card, avg
         return best_card
+
+    def _posterior_worlds(self, view: PlayerView):
+        """Outer worlds from the choice-aware posterior, or None to fall back.
+
+        Weights: at epsilon = 0 every surviving world has weight exactly 1.0
+        (the likelihood factors are 0/1, so survival means all-ones), and the
+        kept worlds are an unbiased sample to be used as-is -- which is the
+        configuration Task 9 runs, because the real opponents ARE the exact
+        deterministic policy being audited. If a caller supplies epsilon > 0
+        the weights are no longer uniform, so using the worlds directly would
+        silently misweight the average; we resample n_outer of them with
+        replacement proportional to weight, using this player's own rng
+        (deterministic given its seed). That is a correct-in-expectation but
+        higher-variance path, and it is not what any committed experiment
+        runs.
+        """
+        try:
+            posterior = self.posterior_factory(view, self.rng)
+        except PosteriorCollapse:
+            # Counted, never silent -- see the counter's comment.
+            self.posterior_collapses += 1
+            return None
+
+        worlds = [[int(h) for h in w] for w in posterior.worlds]
+        weights = [float(w) for w in posterior.weights]
+        assert len(weights) == len(worlds), "posterior weights/worlds mismatch"
+        if not worlds:
+            # NOT a collapse: a collapse raises. An empty list here means the
+            # posterior survived but retained nothing -- i.e. the factory
+            # forgot `keep_worlds=True`. Counting that as a collapse would let
+            # a row run entirely on the constraint sampler while still calling
+            # itself choice-aware, so it is a loud error instead.
+            raise AssertionError(
+                "posterior returned no worlds despite surviving "
+                f"({getattr(posterior, 'n_worlds_used', '?')} worlds kept); "
+                "the factory must pass keep_worlds=True"
+            )
+
+        self.posterior_decisions += 1
+        # Counted BEFORE any resampling, so it reports what the posterior
+        # actually supplied rather than the resampled n_outer.
+        self.posterior_worlds += len(worlds)
+
+        if any(w != weights[0] for w in weights):
+            probs = np.asarray(weights, dtype=float)
+            probs /= probs.sum()
+            idx = self.rng.choice(len(worlds), size=self.n_outer, p=probs)
+            worlds = [worlds[i] for i in idx]
+        return worlds
 
     def _sample(self, table, n_samples: int):
         """Same contract and counter semantics as SearchPlayer._sample."""

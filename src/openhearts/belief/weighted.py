@@ -49,6 +49,17 @@ from openhearts.players.heuristic import HeuristicPlayer
 from openhearts.sampler.sampler import sample_arrangement
 
 
+class PosteriorCollapse(AssertionError):
+    """Every candidate world was killed by choice filtering.
+
+    Subclasses AssertionError so the pre-existing contract ("a loud error,
+    never a silent fallback", and the tests that assert on it) is unchanged,
+    while callers that genuinely need to distinguish this ONE condition from
+    the module's structural asserts -- a broken reconstruction, a replay
+    desync -- can catch it precisely. Nothing else in this module raises it.
+    """
+
+
 def play_likelihood(policy, view: PlayerView, observed_card: int,
                     epsilon: float) -> float:
     """P(policy plays `observed_card` from `view`) under epsilon smoothing.
@@ -196,10 +207,21 @@ class WeightedPosterior:
 
     `unseen_mask` and `opponent_seats` are carried over from the proposal table
     so callers can build their truth mapping without rebuilding a table.
+
+    `worlds` / `weights` are populated only when `from_view(..., keep_worlds=
+    True)`: the surviving candidate worlds themselves (each a 3-list of
+    CURRENT-hand bitmasks in `opponent_seats` order) and their weights, in
+    the order they were accepted. They are what lets a search use the
+    choice-aware posterior as its world source instead of the raw sampler
+    (see `search/honest.py`). Off by default -- the marginals-only callers
+    (guessing metrics) must not pay for retaining tens of thousands of rows.
     """
 
     def __init__(self, probs, opponent_seats, unseen_mask, hand_sizes,
-                 n_effective, draws_used, n_worlds_used, total_weight):
+                 n_effective, draws_used, n_worlds_used, total_weight,
+                 worlds=None, weights=None):
+        self.worlds = worlds if worlds is not None else []
+        self.weights = weights if weights is not None else []
         self.probs = probs
         self.opponent_seats = opponent_seats
         self.unseen_mask = unseen_mask
@@ -212,7 +234,8 @@ class WeightedPosterior:
     @classmethod
     def from_view(cls, view: PlayerView, level, policy, epsilon: float,
                   n_worlds: int, rng, max_draws: int,
-                  _fused: bool = True) -> "WeightedPosterior":
+                  _fused: bool = True,
+                  keep_worlds: bool = False) -> "WeightedPosterior":
         """Draw candidate worlds from the constraint posterior and reweight.
 
         Proposal distribution: `BeliefTable.from_view(view, level)` plus the
@@ -241,6 +264,12 @@ class WeightedPosterior:
         `HeuristicPlayer`); anything else takes the pure-Python path, which is
         untouched.
 
+        `keep_worlds=True` additionally retains each surviving world and its
+        weight on `self.worlds` / `self.weights`. It changes NOTHING about
+        the draws, the rng consumption, the accumulation order or the
+        returned marginals on any of the three paths -- it only copies rows
+        that were already computed.
+
         Structural asserts: on the fused path the per-candidate reconstruction
         asserts are replaced by ONE frame check per call in
         `kernel.fused_audit_context` (see its docstring for why that subsumes
@@ -254,6 +283,7 @@ class WeightedPosterior:
         total_w2 = 0.0
         draws = 0
         kept = 0
+        keep_w, keep_wt = [], []
 
         if not unseen:  # nothing hidden: degenerate but well-defined
             return cls(probs, list(table.opponent_seats), table.unseen_mask,
@@ -279,6 +309,9 @@ class WeightedPosterior:
             kept += 1
             total_w += w
             total_w2 += w * w
+            if keep_worlds:
+                keep_w.append([int(world_hands[i]) for i in range(3)])
+                keep_wt.append(float(w))
             for i in range(3):
                 for c in cards.cards_in(world_hands[i]):
                     probs[i, c] += w
@@ -286,11 +319,18 @@ class WeightedPosterior:
         while kept < n_worlds and draws < max_draws:
             if fused:
                 chunk = min(max_draws - draws, n_worlds - kept)
-                (_w, _wt, n_kept, total_w, total_w2) = \
+                (chunk_worlds, chunk_wts, n_kept, total_w, total_w2) = \
                     kernel.draw_audit_chunk(ctx, rng, chunk, probs,
                                             total_w, total_w2)
                 draws += chunk
                 kept += n_kept
+                if keep_worlds:
+                    # Only the first n_kept rows are meaningful (see
+                    # kernel.draw_audit_chunk); they are already in
+                    # acceptance order.
+                    for j in range(n_kept):
+                        keep_w.append([int(x) for x in chunk_worlds[j]])
+                        keep_wt.append(float(chunk_wts[j]))
                 continue
             if batched:
                 chunk = min(max_draws - draws, n_worlds - kept)
@@ -310,7 +350,7 @@ class WeightedPosterior:
                     world_weight(view, world_hands, policy, epsilon))
 
         if total_w <= 0.0:
-            raise AssertionError(
+            raise PosteriorCollapse(
                 f"no candidate world survived choice filtering after {draws} "
                 f"draws (epsilon={epsilon}, level={level}); this is a loud "
                 f"failure by design, never a silent fallback"
@@ -321,4 +361,4 @@ class WeightedPosterior:
         n_effective = (total_w * total_w) / total_w2
         return cls(probs, list(table.opponent_seats), table.unseen_mask,
                    list(table.hand_sizes), float(n_effective), draws, kept,
-                   float(total_w))
+                   float(total_w), keep_w, keep_wt)
