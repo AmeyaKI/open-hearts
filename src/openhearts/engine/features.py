@@ -175,3 +175,68 @@ def featurize(hands, played_mask, trick_cards, trick_seats, trick_len,
               np.int64(led_suit), np.int64(win_seat), bool(hearts_broken),
               np.int64(trick_number), np.asarray(scores, dtype=np.int64),
               np.int64(seat))
+
+
+# --------------------------------------------------------------------------
+# batch variant (Task 2 addition, per Task 1's implementation note): the
+# LAYOUT above is the forever contract; this out-parameter batch entry point
+# is new surface, not a change to it. It featurizes every (ply, seat) pair of
+# one game -- P plies x 4 seats -- in a single dispatch, so a data generator
+# pays Python/numba-boundary overhead once per game instead of once per row.
+# --------------------------------------------------------------------------
+def _featurize_batch_py(hands, played_mask, trick_cards, trick_seats,
+                        trick_len, led_suit, win_seat, hearts_broken,
+                        trick_number, scores, out):
+    n = hands.shape[0]
+    for p in range(n):
+        for seat in range(4):
+            out[p, seat, :] = _featurize_py(
+                hands[p], played_mask[p], trick_cards[p], trick_seats[p],
+                trick_len[p], led_suit[p], win_seat[p], hearts_broken[p],
+                trick_number[p], scores[p], seat)
+
+
+def _featurize_batch_njit_src(hands, played_mask, trick_cards, trick_seats,
+                              trick_len, led_suit, win_seat, hearts_broken,
+                              trick_number, scores, out):
+    n = hands.shape[0]
+    for p in range(n):
+        for seat in range(4):
+            out[p, seat, :] = _featurize_njit(
+                hands[p], played_mask[p], trick_cards[p], trick_seats[p],
+                trick_len[p], led_suit[p], win_seat[p], hearts_broken[p],
+                trick_number[p], scores[p], seat)
+
+
+_featurize_batch_njit = njit(cache=True)(_featurize_batch_njit_src) \
+    if HAVE_NUMBA else _featurize_batch_njit_src
+
+
+def featurize_batch(hands, played_mask, trick_cards, trick_seats, trick_len,
+                    led_suit, win_seat, hearts_broken, trick_number, scores,
+                    out):
+    """Featurize every ply of one game, all 4 seats, in a single call.
+
+    Same per-argument semantics as `featurize`, but each argument carries a
+    leading ply axis (P plies): `hands` int64[P,4], `played_mask` int64[P],
+    `trick_cards`/`trick_seats` int64[P,4], `trick_len`/`led_suit`/`win_seat`/
+    `trick_number` int64[P], `hearts_broken` bool[P], `scores` int64[P,4].
+
+    `out` is a preallocated float64[P,4,NF] buffer; `out[p, seat]` is filled
+    in place with `featurize(..., seat)` for ply `p` (LAYOUT identical to the
+    per-row call -- the signature is new, the contract is not). Returns `out`
+    for convenience.
+    """
+    fn = _featurize_batch_njit if jit_enabled() else _featurize_batch_py
+    fn(np.asarray(hands, dtype=np.int64),
+       np.asarray(played_mask, dtype=np.int64),
+       np.asarray(trick_cards, dtype=np.int64),
+       np.asarray(trick_seats, dtype=np.int64),
+       np.asarray(trick_len, dtype=np.int64),
+       np.asarray(led_suit, dtype=np.int64),
+       np.asarray(win_seat, dtype=np.int64),
+       np.asarray(hearts_broken, dtype=np.bool_),
+       np.asarray(trick_number, dtype=np.int64),
+       np.asarray(scores, dtype=np.int64),
+       out)
+    return out
