@@ -493,6 +493,85 @@ def sample_arrangements_batch(probs, void_suit_masks, hand_sizes,
 
 
 # --------------------------------------------------------------------------
+# fused draw + reconstruct + audit + accumulate (Phase 3.6)
+# --------------------------------------------------------------------------
+@njit(cache=True)
+def draw_audit_batch(probs_tab, void_masks, hand_sizes, unseen_cards,
+                     n_candidates, max_restarts, seed,
+                     obs_hand, opp_seats, plays_cards, plays_seats,
+                     observer, epsilon, out_probs, worlds, weights,
+                     total_w, total_w2):
+    """Draw `n_candidates` worlds, audit each, accumulate the survivors.
+
+    This is Phase 3.5's `sample_arrangements` + Python
+    `_reconstruct_original_hands` + `audit_world` + `account` loop, fused into
+    one compiled call. It CALLS `sample_arrangements_batch` with the same
+    arguments the 3.5 adapter passes, so the RNG stream and the drawn worlds
+    are unchanged by construction.
+
+    Reconstruction (exact port of `belief.weighted._reconstruct_original_hands`):
+    `worlds[j]` holds opponent i's CURRENT hand in `BeliefTable.opponent_seats`
+    order, so seat `opp_seats[i]`; the observer keeps `obs_hand`; then every
+    observed play is added back to the seat that made it. All four seats are
+    ASSIGNED before any bit is OR-ed back, so the scratch array needs no reset.
+
+    The per-candidate structural asserts of the Python reconstruction (13 cards
+    per seat, disjoint hands, full deck, observer containment) are NOT repeated
+    here: they are subsumed by a once-per-call frame check on the Python side
+    (`fused_audit_context`) plus the sampler's own exit condition. See that
+    function's docstring for the argument.
+
+    Accumulation order matches the Python `account()` exactly -- `kept`,
+    `total_w`, `total_w2`, then `out_probs[i, c] += w` over i ascending and
+    c ascending -- so the float sums are bitwise identical.
+
+    `total_w` / `total_w2` come in as the caller's RUNNING sums and come back
+    updated. Threading them through (rather than summing per chunk and adding)
+    keeps the float association order identical to the one-at-a-time 3.5 loop
+    across chunk boundaries -- without it the totals differ in the last bits.
+
+    Returns `(n_drawn, n_kept, total_w, total_w2, desync)`. `n_drawn` is
+    always `n_candidates` (failed draws still count as draws, as in 3.5).
+    `worlds` / `weights` are filled in for the first `n_kept` survivors.
+    `desync` is True if the observed seat order is impossible in the engine's
+    turn order, which the adapter turns into a loud AssertionError.
+    """
+    hands_out, _attempts, n_ok = sample_arrangements_batch(
+        probs_tab, void_masks, hand_sizes, unseen_cards, n_candidates,
+        max_restarts, seed)
+    n_plays = plays_cards.shape[0]
+    orig = np.zeros(4, dtype=np.int64)
+    n_kept = 0
+    for j in range(n_ok):
+        orig[observer] = obs_hand
+        for i in range(3):
+            orig[opp_seats[i]] = hands_out[j, i]
+        for k in range(n_plays):
+            orig[plays_seats[k]] |= _ONE << plays_cards[k]
+        if n_plays == 0:
+            w = 1.0  # no evidence yet: every world is equally consistent
+        else:
+            w = _audit(orig, plays_cards, plays_seats, observer, epsilon,
+                       True)
+            if w < 0.0:
+                return n_candidates, n_kept, total_w, total_w2, True
+        if w <= 0.0:
+            continue
+        for i in range(3):
+            worlds[n_kept, i] = hands_out[j, i]
+        weights[n_kept] = w
+        n_kept += 1
+        total_w += w
+        total_w2 += w * w
+        for i in range(3):
+            h = hands_out[j, i]
+            for c in range(52):
+                if (h >> c) & 1:
+                    out_probs[i, c] += w
+    return n_candidates, n_kept, total_w, total_w2, False
+
+
+# --------------------------------------------------------------------------
 # belief rebalance (Phase 2.7)
 # --------------------------------------------------------------------------
 @njit(cache=True, inline="always")
@@ -758,6 +837,159 @@ def sample_arrangements(table, rng, n_samples: int, max_restarts: int = 200):
     out = [[int(hands[j, 0]), int(hands[j, 1]), int(hands[j, 2])]
            for j in range(n_ok)]
     return out, n_samples - n_ok
+
+
+class FusedAuditContext:
+    """Everything `draw_audit_batch` needs that is constant across chunks.
+
+    In the hard zone `from_view` runs hundreds of chunks; hoisting these array
+    builds out of the loop is what makes the fusion pay. Holding them fixed
+    also keeps the chunk loop bitwise identical to Phase 3.5's.
+    """
+
+    __slots__ = ("probs", "void_masks", "hand_sizes", "unseen", "obs_hand",
+                 "opp_seats", "plays_cards", "plays_seats", "observer",
+                 "epsilon", "max_restarts")
+
+    def __init__(self, probs, void_masks, hand_sizes, unseen, obs_hand,
+                 opp_seats, plays_cards, plays_seats, observer, epsilon,
+                 max_restarts):
+        self.probs = probs
+        self.void_masks = void_masks
+        self.hand_sizes = hand_sizes
+        self.unseen = unseen
+        self.obs_hand = obs_hand
+        self.opp_seats = opp_seats
+        self.plays_cards = plays_cards
+        self.plays_seats = plays_seats
+        self.observer = observer
+        self.epsilon = epsilon
+        self.max_restarts = max_restarts
+
+
+def fused_audit_context(view, table, observer: int, epsilon: float,
+                        max_restarts: int = 200) -> FusedAuditContext:
+    """Build the per-call context AND run the once-per-call structural checks.
+
+    WHY ONCE PER CALL IS ENOUGH (Phase 3.6). The Python path
+    (`belief.weighted._reconstruct_original_hands`) asserted, for every
+    candidate world, that each reconstructed seat holds exactly 13 cards, that
+    the four hands are disjoint, that their union is the full deck, and that
+    the observer's current hand is contained in its reconstructed hand. Every
+    one of those is a property of the FRAME (observer hand, played cards,
+    unseen mask, hand sizes) combined with the sampler's contract, not of the
+    particular world:
+
+    * checked here, once: `view.hand`, the played cards and `unseen_mask` are
+      pairwise disjoint and union to `FULL_DECK`; `sum(hand_sizes)` equals the
+      number of unseen cards; and for every seat, (cards it has played) +
+      (its remaining hand size) == 13.
+    * guaranteed by `sample_arrangements_batch`: an emitted arrangement is a
+      partition of exactly `unseen_cards` among the three opponents with
+      exactly `hand_sizes[i]` cards each (it only emits when no card was left
+      unplaced and every `remaining[i]` hit 0).
+
+    Together those give disjointness, the 13-card counts, the full-deck union
+    and observer containment for EVERY candidate -- so the per-candidate
+    asserts are subsumed, not dropped.
+
+    The 2-clubs check (`_assert_two_clubs_leads`) is likewise hoisted: the
+    first observed play is always the 2 of clubs, so reconstruction always
+    hands 2C to `all_plays[0][0]`, making the check world-independent. We
+    assert the load-bearing fact (`all_plays[0][1] == TWO_CLUBS`) here rather
+    than assume it.
+    """
+    from openhearts.engine import cards as _cards  # local: avoids import cycle
+
+    all_plays = list(view.history) + list(view.current_trick)
+    played = 0
+    played_counts = [0, 0, 0, 0]
+    for s, c in all_plays:
+        b = _cards.bit(c)
+        assert not (played & b), f"card {c} appears twice in the observed play"
+        played |= b
+        played_counts[s] += 1
+
+    unseen_mask = int(table.unseen_mask)
+    assert not (view.hand & played), (
+        "observer still holds an already-played card")
+    assert not (view.hand & unseen_mask), (
+        "observer's own hand overlaps the unseen mask")
+    assert not (played & unseen_mask), (
+        "an already-played card is marked unseen")
+    assert (view.hand | played | unseen_mask) == _cards.FULL_DECK, (
+        "observer hand + played + unseen is not a full deck")
+
+    unseen = np.array(_cards.cards_in(unseen_mask), dtype=np.int64)
+    hand_sizes = np.array(table.hand_sizes, dtype=np.int64)
+    assert int(hand_sizes.sum()) == unseen.shape[0], (
+        "opponent hand sizes do not account for every unseen card")
+    opp_seats = [int(s) for s in table.opponent_seats]
+    assert opp_seats == [(observer + 1 + i) % 4 for i in range(3)], (
+        "opponent_seats is not in (observer+1+i) %% 4 order")
+    for i, s in enumerate(opp_seats):
+        assert played_counts[s] + int(hand_sizes[i]) == 13, (
+            f"seat {s} played {played_counts[s]} + holds {hand_sizes[i]} "
+            f"!= 13")
+    assert played_counts[observer] + _popcount_py(view.hand) == 13, (
+        "observer's played + held cards do not make 13")
+
+    if all_plays:
+        assert all_plays[0][1] == _cards.TWO_CLUBS, (
+            f"observed game does not open on the 2 of clubs "
+            f"(first play {all_plays[0]})")
+
+    void_masks = np.array(
+        [sum(1 << s for s in table.voids[i]) for i in range(3)],
+        dtype=np.int64)
+    return FusedAuditContext(
+        probs=np.ascontiguousarray(table.probs, dtype=np.float64),
+        void_masks=void_masks,
+        hand_sizes=hand_sizes,
+        unseen=unseen,
+        obs_hand=np.int64(view.hand),
+        opp_seats=np.array(opp_seats, dtype=np.int64),
+        plays_cards=np.array([c for _s, c in all_plays], dtype=np.int64),
+        plays_seats=np.array([s for s, _c in all_plays], dtype=np.int64),
+        observer=np.int64(observer),
+        epsilon=float(epsilon),
+        max_restarts=max_restarts,
+    )
+
+
+def _popcount_py(mask: int) -> int:
+    return bin(mask).count("1")
+
+
+def draw_audit_chunk(ctx: FusedAuditContext, rng, n_candidates: int,
+                     out_probs, total_w: float = 0.0,
+                     total_w2: float = 0.0):
+    """One fused chunk: draw, audit, accumulate into `out_probs`.
+
+    Takes exactly ONE `rng.integers(2**63)` draw, seeding the compiled
+    sampler -- identical rng consumption to Phase 3.5's
+    `kernel.sample_arrangements` for the same chunk.
+
+    `total_w` / `total_w2` are the caller's running sums (see
+    `draw_audit_batch`); the updated values are returned.
+
+    Returns `(worlds, weights, n_kept, total_w, total_w2)`; only the first
+    `n_kept` rows of `worlds` / `weights` are meaningful.
+    """
+    seed = int(rng.integers(2**63))
+    worlds = np.zeros((n_candidates, 3), dtype=np.int64)
+    weights = np.zeros(n_candidates, dtype=np.float64)
+    (_n_drawn, n_kept, total_w, total_w2, desync) = draw_audit_batch(
+        ctx.probs, ctx.void_masks, ctx.hand_sizes, ctx.unseen,
+        n_candidates, ctx.max_restarts, seed, ctx.obs_hand, ctx.opp_seats,
+        ctx.plays_cards, ctx.plays_seats, ctx.observer, ctx.epsilon,
+        out_probs, worlds, weights, float(total_w), float(total_w2))
+    if desync:
+        raise AssertionError(
+            "replay desync: observed seat order does not match the engine's "
+            "turn order in this world"
+        )
+    return worlds, weights, int(n_kept), float(total_w), float(total_w2)
 
 
 def run_playout_until_decision(state, stop_seat: int) -> bool:

@@ -211,7 +211,8 @@ class WeightedPosterior:
 
     @classmethod
     def from_view(cls, view: PlayerView, level, policy, epsilon: float,
-                  n_worlds: int, rng, max_draws: int) -> "WeightedPosterior":
+                  n_worlds: int, rng, max_draws: int,
+                  _fused: bool = True) -> "WeightedPosterior":
         """Draw candidate worlds from the constraint posterior and reweight.
 
         Proposal distribution: `BeliefTable.from_view(view, level)` plus the
@@ -227,6 +228,23 @@ class WeightedPosterior:
         unchanged), but the random STREAM differs -- the batch sampler is
         seeded once per batch from `rng` instead of consuming it per card.
         Same caveat class as Phase 2.6; the Python path is bitwise unchanged.
+
+        Phase 3.6 fuses draw+reconstruct+audit+accumulate into one compiled
+        call per chunk (`kernel.draw_audit_chunk`). The chunk loop, the seed
+        draws and the accumulation order are unchanged, so the fused path is
+        BITWISE identical to the 3.5 path -- `_fused=False` keeps the 3.5
+        unfused path reachable for tests. The non-obvious part of that claim:
+        `total_w` / `total_w2` are threaded THROUGH the kernel as running
+        sums rather than summed per chunk and added here, because the latter
+        changes the float association order across chunk boundaries. Both are gated on the same
+        condition as 3.5 (`kernel.jit_enabled()` and a plain
+        `HeuristicPlayer`); anything else takes the pure-Python path, which is
+        untouched.
+
+        Structural asserts: on the fused path the per-candidate reconstruction
+        asserts are replaced by ONE frame check per call in
+        `kernel.fused_audit_context` (see its docstring for why that subsumes
+        them), plus the kernel's own per-ply legality checks.
         """
         table = BeliefTable.from_view(view, level)
         unseen = cards.cards_in(table.unseen_mask)
@@ -249,6 +267,9 @@ class WeightedPosterior:
         # seeded once per call from `rng`); that is the same documented
         # caveat as Phase 2.6, and the Python path is bitwise unchanged.
         batched = kernel.jit_enabled() and type(policy) is HeuristicPlayer
+        fused = batched and _fused
+        ctx = (kernel.fused_audit_context(view, table, view.seat, epsilon)
+               if fused else None)
 
         def account(world_hands, w):
             nonlocal kept, total_w, total_w2
@@ -263,6 +284,14 @@ class WeightedPosterior:
                     probs[i, c] += w
 
         while kept < n_worlds and draws < max_draws:
+            if fused:
+                chunk = min(max_draws - draws, n_worlds - kept)
+                (_w, _wt, n_kept, total_w, total_w2) = \
+                    kernel.draw_audit_chunk(ctx, rng, chunk, probs,
+                                            total_w, total_w2)
+                draws += chunk
+                kept += n_kept
+                continue
             if batched:
                 chunk = min(max_draws - draws, n_worlds - kept)
                 batch, _n_failed = kernel.sample_arrangements(table, rng,
