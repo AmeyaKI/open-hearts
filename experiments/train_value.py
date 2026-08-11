@@ -299,6 +299,12 @@ def main():
     ap.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     ap.add_argument("--device", default=None,
                     help="force a device; default = measured fastest")
+    ap.add_argument("--hidden1", type=int, default=128)
+    ap.add_argument("--hidden2", type=int, default=64)
+    ap.add_argument("--patience", type=int, default=PATIENCE)
+    ap.add_argument("--tag", default="v1",
+                    help="output name tag: value_<tag>.{pt,npz}, "
+                         "value_train_<tag>.txt/.png when != v1")
     args = ap.parse_args()
     if not (args.smoke or args.full):
         ap.error("pass --smoke or --full")
@@ -349,17 +355,17 @@ def main():
                 yield (np.ascontiguousarray(Xf[i:i + args.batch_size]),
                        np.ascontiguousarray(Yf[i:i + args.batch_size]))
 
-    model = vmodel.make_model(SEED_INIT)
+    model = vmodel.make_model(SEED_INIT, args.hidden1, args.hidden2)
     t0 = time.time()
     hist = vmodel.train(model, epoch_batches, vaX, vaY, device=device,
-                        epochs=epochs, lr=args.lr, patience=PATIENCE,
+                        epochs=epochs, lr=args.lr, patience=args.patience,
                         seed=SEED_INIT)
     train_s = time.time() - t0
     print(f"training done in {train_s:.1f}s", flush=True)
 
-    ckpt = os.path.join(OUT_DIR, "value_v1.pt")
+    ckpt = os.path.join(OUT_DIR, f"value_{args.tag}.pt")
     torch.save(model.state_dict(), ckpt)
-    npz_path = os.path.join(OUT_DIR, "value_v1.npz")
+    npz_path = os.path.join(OUT_DIR, f"value_{args.tag}.npz")
     vmodel.export_npz(model, npz_path, extra={
         "seed_init": SEED_INIT, "seed_shuffle": SEED_SHUFFLE, "lr": args.lr,
         "batch_size": args.batch_size, "device": device,
@@ -449,7 +455,7 @@ def main():
     A(f"# seeds: init={SEED_INIT} shuffle={SEED_SHUFFLE} "
       f"(shard order + within-shard permutation, per epoch)")
     A(f"# epochs_max={epochs} lr={args.lr} batch_size={args.batch_size} "
-      f"patience={PATIENCE} optimizer=Adam loss=MSE(4 rotated outputs) "
+      f"patience={args.patience} optimizer=Adam loss=MSE(4 rotated outputs) "
       f"ridge_lambda={RIDGE_LAMBDA} (intercept unpenalised)")
     A(f"# shards: train={len(tr_paths)} val={len(va_paths)} "
       f"test={len(te_paths)}; test rows={teX.shape[0]} "
@@ -560,15 +566,19 @@ def main():
       "MPS produced a BYTE-IDENTICAL exported .npz (sha256 equal). That is "
       "evidence, not a guarantee, at full scale.")
     txt = "\n".join(lines) + "\n"
-    with open(TXT_PATH, "w") as f:
+    txt_path, png_path = TXT_PATH, PNG_PATH
+    if args.tag != "v1":
+        txt_path = os.path.join(RESULTS, f"value_train_{args.tag}.txt")
+        png_path = os.path.join(RESULTS, f"value_train_{args.tag}.png")
+    with open(txt_path, "w") as f:
         f.write(txt)
     with open(os.path.join(OUT_DIR, "history.json"), "w") as f:
         json.dump({"history": hist, "overall": overall, "buckets": buckets,
                    "heur_only": heur_only, "rand_only": rand_only,
                    "devices": dev_results, "device": device}, f, indent=2)
-    make_plot(PNG_PATH, hist, buckets, order[:4])
+    make_plot(png_path, hist, buckets, order[:4])
     print(txt)
-    print(f"wrote {TXT_PATH}, {PNG_PATH}, {ckpt}, {npz_path}")
+    print(f"wrote {txt_path}, {png_path}, {ckpt}, {npz_path}")
 
 
 if __name__ == "__main__":

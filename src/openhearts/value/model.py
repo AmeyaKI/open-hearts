@@ -32,11 +32,12 @@ LAYER_SIZES = [NF, HIDDEN1, HIDDEN2, N_OUT]
 
 
 class ValueMLP(nn.Module):
-    def __init__(self):
+    def __init__(self, hidden1=HIDDEN1, hidden2=HIDDEN2):
         super().__init__()
-        self.fc1 = nn.Linear(NF, HIDDEN1)
-        self.fc2 = nn.Linear(HIDDEN1, HIDDEN2)
-        self.fc3 = nn.Linear(HIDDEN2, N_OUT)
+        self.fc1 = nn.Linear(NF, hidden1)
+        self.fc2 = nn.Linear(hidden1, hidden2)
+        self.fc3 = nn.Linear(hidden2, N_OUT)
+        self.layer_sizes = [NF, hidden1, hidden2, N_OUT]
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))
@@ -44,10 +45,10 @@ class ValueMLP(nn.Module):
         return self.fc3(x)
 
 
-def make_model(seed=0):
+def make_model(seed=0, hidden1=HIDDEN1, hidden2=HIDDEN2):
     """Deterministic init: same seed -> same initial weights."""
     torch.manual_seed(seed)
-    return ValueMLP().float()
+    return ValueMLP(hidden1, hidden2).float()
 
 
 def weights_dict(model):
@@ -64,7 +65,8 @@ def weights_dict(model):
 
 def export_npz(model, path, extra=None):
     """Write the trained weights as float64 `.npz` (+ FEATURES_V / shapes)."""
-    return save_npz(path, weights_dict(model), LAYER_SIZES, extra=extra)
+    sizes = getattr(model, "layer_sizes", LAYER_SIZES)
+    return save_npz(path, weights_dict(model), sizes, extra=extra)
 
 
 # ------------------------------------------------------------------ devices
