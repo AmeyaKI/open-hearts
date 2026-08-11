@@ -6,6 +6,11 @@ dependencies = ["numpy>=1.26", "matplotlib>=3.8", "numba>=0.60"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Training-time only (PHASE4_PLAN.md Task 0 decision). Play-time code and the
+# core package NEVER import torch: trained weights ship as flat .npz and are
+# read by a numba forward pass. Only src/openhearts/value/model.py and
+# experiments/train_value.py may import torch.
+train = ["torch>=2.0"]
 
 [build-system]
 requires = ["setuptools>=68"]
