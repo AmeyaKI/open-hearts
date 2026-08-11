@@ -42,9 +42,10 @@ Honesty notes (all of these belong in any writeup that uses this class):
 import numpy as np
 
 from openhearts.belief.table import BeliefTable
-from openhearts.engine import cards
+from openhearts.engine import cards, kernel
 from openhearts.engine.game import legal_moves
 from openhearts.engine.state import GameState, PlayerView
+from openhearts.players.heuristic import HeuristicPlayer
 from openhearts.sampler.sampler import sample_arrangement
 
 
@@ -117,22 +118,49 @@ def world_weight(view: PlayerView, world_hands, policy,
     contribute 1.0 -- we know why we played them, they carry no information
     about the hidden hands. Returns 0.0 the moment the world cannot produce the
     observed play (illegal move, or a zero policy factor under epsilon = 0).
+
+    Dispatch (Phase 3.5): when the JIT is active AND `policy` is exactly a
+    plain `HeuristicPlayer`, the replay runs in `kernel.audit_world`, which is
+    a verified port of the loop below (tests/test_jit_audit.py pins them
+    bitwise). Any other policy -- including a subclass overriding `choose` --
+    takes the Python path, because the kernel's policy is hardcoded. The
+    Python path itself is untouched and remains the reference.
     """
     assert 0.0 <= epsilon <= 1.0, f"epsilon out of range: {epsilon}"
     hands, all_plays = _reconstruct_original_hands(view, world_hands)
     if not all_plays:
         return 1.0  # no evidence yet: every world is equally consistent
+    _assert_two_clubs_leads(hands, all_plays)
+    if kernel.jit_enabled() and type(policy) is HeuristicPlayer:
+        return kernel.audit_world_weight(hands, all_plays, view.seat, epsilon)
+    return _replay_weight_python(view, hands, all_plays, policy, epsilon)
 
-    state = GameState(hands=hands)
+
+def world_weight_python(view: PlayerView, world_hands, policy,
+                        epsilon: float) -> float:
+    """The pure-Python reference audit; never dispatches to the kernel."""
+    assert 0.0 <= epsilon <= 1.0, f"epsilon out of range: {epsilon}"
+    hands, all_plays = _reconstruct_original_hands(view, world_hands)
+    if not all_plays:
+        return 1.0
+    _assert_two_clubs_leads(hands, all_plays)
+    return _replay_weight_python(view, hands, all_plays, policy, epsilon)
+
+
+def _assert_two_clubs_leads(hands, all_plays):
     # The replay must start at the 2-clubs holder, exactly as eval/guessing.py
     # does; starting at seat 0 would desync seats and score the wrong views.
-    state.to_play = next(
-        s for s in range(4) if hands[s] & cards.bit(cards.TWO_CLUBS)
-    )
-    assert state.to_play == all_plays[0][0], (
-        f"world's 2c holder {state.to_play} did not lead the observed game "
+    leader = next(s for s in range(4) if hands[s] & cards.bit(cards.TWO_CLUBS))
+    assert leader == all_plays[0][0], (
+        f"world's 2c holder {leader} did not lead the observed game "
         f"(observed leader {all_plays[0][0]})"
     )
+
+
+def _replay_weight_python(view: PlayerView, hands, all_plays, policy,
+                          epsilon: float) -> float:
+    state = GameState(hands=hands)
+    state.to_play = all_plays[0][0]
 
     observer = view.seat
     weight = 1.0
@@ -191,6 +219,14 @@ class WeightedPosterior:
         signature takes `level`, and `level` is what is used, so the caller
         chooses.) Draws until `n_worlds` worlds have positive weight or
         `max_draws` candidates have been drawn. Raises if nothing survives.
+
+        On the JIT path candidates are drawn in batches through
+        `kernel.sample_arrangements` and audited by `kernel.audit_world`.
+        `draws_used`, `n_worlds_used` and `n_effective` mean exactly what
+        they mean on the Python path (chunks are sized so the draw count is
+        unchanged), but the random STREAM differs -- the batch sampler is
+        seeded once per batch from `rng` instead of consuming it per card.
+        Same caveat class as Phase 2.6; the Python path is bitwise unchanged.
         """
         table = BeliefTable.from_view(view, level)
         unseen = cards.cards_in(table.unseen_mask)
@@ -205,23 +241,44 @@ class WeightedPosterior:
             return cls(probs, list(table.opponent_seats), table.unseen_mask,
                        list(table.hand_sizes), 0.0, 0, 0, 0.0)
 
+        # Phase 3.5: on the JIT path draw candidates in batches through the
+        # 2.6 batch sampler. Chunk size is min(remaining draws, worlds still
+        # wanted), so a chunk can never be cut short by reaching n_worlds --
+        # `draws` therefore counts exactly what the one-at-a-time loop below
+        # would have counted. The draw STREAM differs (the batch sampler is
+        # seeded once per call from `rng`); that is the same documented
+        # caveat as Phase 2.6, and the Python path is bitwise unchanged.
+        batched = kernel.jit_enabled() and type(policy) is HeuristicPlayer
+
+        def account(world_hands, w):
+            nonlocal kept, total_w, total_w2
+            assert np.isfinite(w) and w >= 0.0, f"bad world weight {w}"
+            if w <= 0.0:
+                return
+            kept += 1
+            total_w += w
+            total_w2 += w * w
+            for i in range(3):
+                for c in cards.cards_in(world_hands[i]):
+                    probs[i, c] += w
+
         while kept < n_worlds and draws < max_draws:
+            if batched:
+                chunk = min(max_draws - draws, n_worlds - kept)
+                batch, _n_failed = kernel.sample_arrangements(table, rng,
+                                                              chunk)
+                draws += chunk
+                for world_hands in batch:
+                    account(world_hands,
+                            world_weight(view, world_hands, policy, epsilon))
+                continue
             draws += 1
             drawn = sample_arrangement(table, rng)
             if drawn is None:
                 continue  # sampler hit its restart cap; count the draw, move on
             world_hands, _attempts = drawn
-            w = world_weight(view, world_hands, policy, epsilon)
-            assert np.isfinite(w) and w >= 0.0, f"bad world weight {w}"
-            if w <= 0.0:
-                continue
-            kept += 1
-            total_w += w
-            total_w2 += w * w
-            for i in range(3):
-                h = world_hands[i]
-                for c in cards.cards_in(h):
-                    probs[i, c] += w
+            account(world_hands,
+                    world_weight(view, world_hands, policy, epsilon))
 
         if total_w <= 0.0:
             raise AssertionError(

@@ -302,6 +302,119 @@ def playout_until_decision(hands, to_play, played_mask, trick_cards,
 
 
 # --------------------------------------------------------------------------
+# candidate-world audit (Phase 3.5)
+# --------------------------------------------------------------------------
+@njit(cache=True)
+def _audit(hands, plays_cards, plays_seats, observer, epsilon, early_exit):
+    """Replay the observed sequence in a candidate world; return its weight.
+
+    Exact port of `belief.weighted.world_weight`'s replay loop with
+    `HeuristicPlayer` as the policy: at each OPPONENT ply multiply in
+    (1-eps)*[heuristic would play this card] + eps/n_legal; the observer's
+    own plies contribute 1.0; an observed card that is illegal in this world
+    returns 0.0. With `early_exit` a zero policy factor returns 0.0
+    immediately (the eps=0 rejection fast path); without it the zero is
+    multiplied through, which is the same answer more slowly.
+
+    `hands` is the four ORIGINAL 13-card hands (mutated in place -- the
+    adapter hands over a private array). Turn order is derived here exactly
+    as the engine does; a mismatch against the observed seat returns the
+    sentinel -1.0, which the adapter turns into the Python path's loud
+    "replay desync" AssertionError.
+    """
+    n = plays_cards.shape[0]
+    trick_cards = np.zeros(4, dtype=np.int64)
+    trick_seats = np.zeros(4, dtype=np.int64)
+    trick_len = 0
+    trick_number = 0
+    hearts_broken = False
+    played_mask = np.int64(0)
+    to_play = plays_seats[0]
+    weight = 1.0
+    for k in range(n):
+        seat = plays_seats[k]
+        card = plays_cards[k]
+        if seat != to_play:
+            return -1.0
+        led_suit, win_rank, _ws = _trick_head(trick_cards, trick_seats,
+                                              trick_len)
+        hand = hands[seat]
+        legal = _legal(hand, led_suit, trick_len, hearts_broken, trick_number)
+        if ((legal >> card) & 1) == 0:
+            return 0.0
+        if seat != observer:
+            n_legal = _popcount(legal)
+            # `seen` for the leading rule: everything played so far plus this
+            # seat's own remaining hand -- the same quantity the Python
+            # policy builds from view.history and view.hand (mid-trick cards
+            # cannot matter; the rule is only consulted when the trick is
+            # empty).
+            choice = _choose(hand, legal, led_suit, win_rank, trick_len,
+                             played_mask | hand)
+            hit = 1.0 if choice == card else 0.0
+            factor = (1.0 - epsilon) * hit + epsilon / n_legal
+            if factor == 0.0 and early_exit:
+                return 0.0
+            weight *= factor
+        bit = _ONE << card
+        hands[seat] = hand & ~bit
+        played_mask |= bit
+        if card // 13 == 3:
+            hearts_broken = True
+        trick_cards[trick_len] = card
+        trick_seats[trick_len] = seat
+        trick_len += 1
+        if trick_len == 4:
+            _l, _r, win_seat = _trick_head(trick_cards, trick_seats, trick_len)
+            trick_len = 0
+            trick_number += 1
+            to_play = win_seat
+        else:
+            to_play = (seat + 1) % 4
+    return weight
+
+
+@njit(cache=True)
+def audit_world(orig_hands, plays_cards, plays_seats, observer, epsilon):
+    """Weight of a candidate world, with the rung-1 early exit."""
+    return _audit(orig_hands, plays_cards, plays_seats, observer, epsilon,
+                  True)
+
+
+@njit(cache=True)
+def audit_world_no_early_exit(orig_hands, plays_cards, plays_seats, observer,
+                              epsilon):
+    """Same weight, multiplying every policy factor through (test oracle)."""
+    return _audit(orig_hands, plays_cards, plays_seats, observer, epsilon,
+                  False)
+
+
+def audit_world_weight(hands, all_plays, observer, epsilon,
+                       early_exit: bool = True) -> float:
+    """Adapter: compiled audit for reconstructed hands + observed plays.
+
+    `hands` are the four ORIGINAL hands and `all_plays` the observed
+    ((seat, card), ...) sequence, both produced by
+    `belief.weighted._reconstruct_original_hands` -- every structural assert
+    stays on the Python side of this boundary.
+    """
+    if not all_plays:
+        return 1.0  # no evidence yet: every world is equally consistent
+    arr_hands = np.array(hands, dtype=np.int64)
+    seats = np.array([s for s, _c in all_plays], dtype=np.int64)
+    cs = np.array([c for _s, c in all_plays], dtype=np.int64)
+    fn = audit_world if early_exit else audit_world_no_early_exit
+    w = float(fn(arr_hands, cs, seats, np.int64(observer), float(epsilon)))
+    if w == -1.0:
+        raise AssertionError(
+            "replay desync: observed seat order does not match the engine's "
+            "turn order in this world"
+        )
+    assert np.isfinite(w) and w >= 0.0, f"bad world weight {w}"
+    return w
+
+
+# --------------------------------------------------------------------------
 # batch arrangement sampler (Phase 2.6)
 # --------------------------------------------------------------------------
 @njit(cache=True)
