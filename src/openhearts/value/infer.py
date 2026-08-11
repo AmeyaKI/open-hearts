@@ -43,13 +43,19 @@ def load_weights(path):
         f"{FEATURES_V}")
     assert sizes[0] == NF, f"{path}: input dim {sizes[0]} != NF={NF}"
     assert sizes[-1] == 4, f"{path}: output dim {sizes[-1]} != 4"
-    W1 = np.ascontiguousarray(w["W1"], dtype=np.float64)
+    # W1 is stored (h1, NF) but returned TRANSPOSED, (NF, h1): the forward
+    # pass exploits feature sparsity (~87 of 333 nonzero) by walking input
+    # columns and skipping zeros, which wants each input's weight row
+    # contiguous. This tuple's layout is a private contract between
+    # load_weights and value_forward/_batch -- anyone rebuilding the npz dict
+    # for forward_numpy must transpose back (see tests/test_value_infer.py).
+    W1 = np.ascontiguousarray(w["W1"].T, dtype=np.float64)
     b1 = np.ascontiguousarray(w["b1"], dtype=np.float64)
     W2 = np.ascontiguousarray(w["W2"], dtype=np.float64)
     b2 = np.ascontiguousarray(w["b2"], dtype=np.float64)
     W3 = np.ascontiguousarray(w["W3"], dtype=np.float64)
     b3 = np.ascontiguousarray(w["b3"], dtype=np.float64)
-    assert W1.shape[1] == NF, f"{path}: W1 input dim {W1.shape[1]} != NF"
+    assert W1.shape[0] == NF, f"{path}: W1 input dim {W1.shape[0]} != NF"
     assert W3.shape[0] == 4, f"{path}: W3 output dim {W3.shape[0]} != 4"
     return W1, b1, W2, b2, W3, b3
 
@@ -61,20 +67,30 @@ def _value_forward_py(W1, b1, W2, b2, W3, b3, features):
     the `OPENHEARTS_NO_JIT=1` fallback (identical source, per house
     convention). Loop bounds come from the passed-in array shapes -- hidden
     sizes 128/64 are never hardcoded.
+
+    First layer is SPARSE: `W1` arrives transposed (NF, h1) from
+    `load_weights`, and input columns with feature value exactly 0.0 are
+    skipped (~87 of 333 features are nonzero in practice -- measured 4.5x on
+    the layer that dominates cost). Skipping exact-zero terms changes only
+    summation ORDER, so agreement with `forward_numpy` stays within the
+    pinned <=1e-6 relative gate.
     """
-    n_in = W1.shape[1]
-    h1_size = W1.shape[0]
+    n_in = W1.shape[0]
+    h1_size = W1.shape[1]
     h2_size = W2.shape[0]
     out_size = W3.shape[0]
 
     h1 = np.zeros(h1_size, dtype=np.float64)
     for i in range(h1_size):
-        s = b1[i]
-        for j in range(n_in):
-            s += W1[i, j] * features[j]
-        if s < 0.0:
-            s = 0.0
-        h1[i] = s
+        h1[i] = b1[i]
+    for j in range(n_in):
+        x = features[j]
+        if x != 0.0:
+            for i in range(h1_size):
+                h1[i] += W1[j, i] * x
+    for i in range(h1_size):
+        if h1[i] < 0.0:
+            h1[i] = 0.0
 
     h2 = np.zeros(h2_size, dtype=np.float64)
     for i in range(h2_size):

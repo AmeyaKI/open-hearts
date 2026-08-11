@@ -57,7 +57,9 @@ def test_value_forward_batch_matches_forward_numpy(feature_rows, weights):
     out = np.zeros((X.shape[0], 4), dtype=np.float64)
     value_forward_batch(W1, b1, W2, b2, W3, b3, X, out)
 
-    w_dict = {"W1": W1, "b1": b1, "W2": W2, "b2": b2, "W3": W3, "b3": b3}
+    # load_weights returns W1 transposed (NF, h1) for the sparse first
+    # layer; forward_numpy expects the stored (h1, NF) orientation.
+    w_dict = {"W1": W1.T, "b1": b1, "W2": W2, "b2": b2, "W3": W3, "b3": b3}
     ref = forward_numpy(w_dict, X)
 
     # Relative error, denominator floored at 1 point (house convention, see
@@ -71,7 +73,8 @@ def test_value_forward_single_row_matches_batch(feature_rows, weights):
     X = feature_rows[:200]
     for i in range(X.shape[0]):
         got = value_forward(W1, b1, W2, b2, W3, b3, X[i])
-        w_dict = {"W1": W1, "b1": b1, "W2": W2, "b2": b2, "W3": W3, "b3": b3}
+        w_dict = {"W1": W1.T, "b1": b1,
+                  "W2": W2, "b2": b2, "W3": W3, "b3": b3}
         ref = forward_numpy(w_dict, X[i:i + 1])[0]
         rel = np.max(np.abs(got - ref) / np.maximum(np.abs(ref), 1.0))
         assert rel <= 1e-6
