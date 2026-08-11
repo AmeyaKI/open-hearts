@@ -161,6 +161,10 @@ CHOICE crosses the old 0.588 ceiling by **trick 9** and reaches **0.899 mean pro
 *A metric caveat:* the NLL column in `guessing2.png`'s four-line panel excludes "truth-zero" cards (cases where none of the sampled worlds happened to include the true holder for a given card — possible with a finite number of worlds, not a floor or a smoothing trick). That makes CHOICE's NLL line look better than a fully fair comparison would, since it's dropping exactly its hardest cases; meanP and top-1 are unaffected (a truth-zero counts as 0.0 / a miss, not excluded) and are the metrics to trust for the headline comparison above.
 
 ![Choice-aware guessing breaks the constraint-only ceiling](docs/guessing2.png)
+
+![Top-1 vs top-2 accuracy: by the last trick the choice guesser's top two candidates contain the truth 99% of the time](docs/topk.png)
+
+*(Top-3 is trivially 100% with only three opponents. The striking number here: CHOICE top-2 reaches 0.99 at trick 13 — the guesser's residual uncertainty is almost always between its two leading candidates, never a wild miss.)*
 *Mean probability on the true card, top-1 accuracy, and NLL by trick, all four belief levels. CHOICE (reading opponents' choices) visibly separates from FULL (constraints only) starting mid-hand and crosses the old 0.588 ceiling around trick 9.*
 
 **Survival (how often the world-filtering search runs dry).** Filtering out inconsistent worlds means some decisions can come up empty — no sampled world survives. `survival.txt` measures this under strict filtering (epsilon=0) across 300 games: the hardest stretch is tricks 6–9, where about **25% of decisions hit budget exhaustion at trick 8** (the single worst point) but total collapse — meaning *every* attempt fails and the code has to fall back — stays under 1% everywhere. The escalation mechanism sketched in planning (raising the sampling budget partway through) turned out to be unnecessary once the JIT speedup landed — the plain fixed budget was cheap enough to just run.
@@ -178,6 +182,14 @@ CHOICE crosses the old 0.588 ceiling by **trick 9** and reaches **0.899 mean pro
 | honest-FULL     | 3.253 | [3.070, 3.447]  |
 
 Paired per-deal (same identical-deals trick as Phase 2): honest-CHOICE beats honest-FULL by **+0.385 points/hand, 95% CI (+0.211, +0.561)** — a clear, non-null improvement from reading choices, stacked on top of Phase 2's honest search. `ablation3.txt` also reports that 44 of the run's decisions (0.2% of the ~20,700 total) hit a full posterior collapse and silently-forbidden-fallback rule kicked in, falling back to the plain constraint sampler for that one decision only — small, but stated rather than hidden, per the project's truth-safety rule.
+
+## Current performance at a glance
+
+![The search ladder: from random play (11.5 pts/hand) to the full pipeline (2.87)](docs/search_ladder.png)
+
+![Full-pipeline ablation row: choice-aware beliefs through honest search](docs/ablation3.png)
+
+One axis, whole story: random legal play eats 11.5 points a hand, a competent rule-follower 6.5, any sampled-playout search roughly halves that, and choice-aware beliefs through the honest search reach 2.87 — an 11% share of each hand's 26 points, against opponents taking ~30% each.
 
 ## Known limitations
 
