@@ -49,9 +49,29 @@ TWO RECORDED PLAN DEVIATIONS / CORRECTIONS
     available here. This is an evaluation-design artifact for the lead/owner
     to weigh -- it is deliberately NOT used to redefine the gate.
 
+TASK 6.5: `--data-dir` (distillation labels)
+--------------------------------------------
+`--data-dir` defaults to `results/value_data` (the Task-2 outcome-label
+shards), so the v1 results reproduce with default flags. Pointed at
+`results/value_data_playout` (`gen_value_data.py --target playout`) the whole
+pipeline runs unchanged -- same architecture, same baselines, same buckets,
+same heur/rand-mix breakdown -- with two honest consequences that the output
+file states explicitly:
+
+  * Baseline 3 (one heuristic playout) is 0.000 BY DEFINITION on these rows:
+    the label IS that playout. It is not an estimator here, it is the target,
+    so the pre-registered criterion 'MLP beats baseline 3' is definitionally
+    unwinnable and is marked N/A rather than FAIL. This script asserts the
+    0.000 exactly -- that assertion doubles as an end-to-end cross-check of
+    the generator's labels against this script's independent replay.
+  * The Task 6.5 gate REPLACES it: test MSE (evaluated seat, overall) <= 4.0.
+    PASS/FAIL is printed prominently.
+
 Usage:
   .venv/bin/python experiments/train_value.py --smoke
   .venv/bin/python experiments/train_value.py --full
+  .venv/bin/python experiments/train_value.py --full \\
+      --data-dir results/value_data_playout --tag v2
 """
 import argparse
 import json
@@ -72,6 +92,7 @@ import gen_value_data as G  # noqa: E402  (player mix + split rules live there)
 HERE = os.path.dirname(os.path.abspath(__file__))
 RESULTS = os.path.join(HERE, "..", "results")
 DATA_DIR = os.path.join(RESULTS, "value_data")
+GATE_6_5_MSE = 4.0      # PHASE4_PLAN.md Task 6.5 pre-registered gate 1
 OUT_DIR = os.path.join(RESULTS, "value_train")
 TXT_PATH = os.path.join(RESULTS, "value_train.txt")
 PNG_PATH = os.path.join(RESULTS, "value_train.png")
@@ -90,6 +111,21 @@ BUCKETS = [("tricks 1-4", 0, 16), ("tricks 5-9", 16, 36),
 def shard_paths(split, data_dir=DATA_DIR):
     return sorted(os.path.join(data_dir, p) for p in os.listdir(data_dir)
                   if p.startswith(f"value_{split}_") and p.endswith(".npz"))
+
+
+def data_target(paths):
+    """'outcome' or 'playout' -- read from the shards' own meta.
+
+    Task-2 shards predate the key; its absence means outcome labels (see
+    `gen_value_data.generate`, where the key is written only off the default
+    path so outcome-mode shards stay byte-identical).
+    """
+    targets = set()
+    for p in paths:
+        meta = np.load(p, allow_pickle=True)["meta"].item()
+        targets.add(meta.get("target", "outcome"))
+    assert len(targets) == 1, f"shards mix label types: {sorted(targets)}"
+    return targets.pop()
 
 
 def rotated_targets(targets, seat_index, game_ids, ply_index):
@@ -302,6 +338,10 @@ def main():
     ap.add_argument("--hidden1", type=int, default=128)
     ap.add_argument("--hidden2", type=int, default=64)
     ap.add_argument("--patience", type=int, default=PATIENCE)
+    ap.add_argument("--data-dir", default=DATA_DIR,
+                    help="shard directory; default results/value_data "
+                         "(Task 2 outcome labels). Point at "
+                         "results/value_data_playout for Task 6.5.")
     ap.add_argument("--tag", default="v1",
                     help="output name tag: value_<tag>.{pt,npz}, "
                          "value_train_<tag>.txt/.png when != v1")
@@ -315,15 +355,19 @@ def main():
 
     t_start = time.time()
     os.makedirs(OUT_DIR, exist_ok=True)
-    tr_paths = shard_paths("train")
-    va_paths = shard_paths("val")
-    te_paths = shard_paths("test")
+    data_dir = os.path.abspath(args.data_dir)
+    tr_paths = shard_paths("train", data_dir)
+    va_paths = shard_paths("val", data_dir)
+    te_paths = shard_paths("test", data_dir)
     epochs = args.epochs
     if args.smoke:
         tr_paths, va_paths, te_paths = tr_paths[:2], va_paths[:1], te_paths[:1]
         epochs = 2
-    assert tr_paths and va_paths and te_paths, "no shards found"
+    assert tr_paths and va_paths and te_paths, f"no shards found in {data_dir}"
+    label_target = data_target(tr_paths + va_paths + te_paths)
+    is_distill = label_target == "playout"
 
+    print(f"data_dir={data_dir} label target={label_target}", flush=True)
     print(f"train shards={len(tr_paths)} val={len(va_paths)} "
           f"test={len(te_paths)}", flush=True)
 
@@ -407,10 +451,20 @@ def main():
         test_seeds, progress=200 if len(test_seeds) > 200 else None)
     playout_s = time.time() - t0
     pred_po = gather_playout(preds_po, tegid, teply, teseat)
-    # cross-check: recorded targets must equal the replay's own outcome
-    true_replay = gather_playout(truths_po, tegid, teply, teseat)
-    assert np.max(np.abs(true_replay - true)) < 1e-6, \
-        "replayed game outcomes disagree with the shard targets"
+    # cross-check: the shard targets must equal the quantity this script
+    # reconstructs independently from the deal seed -- the replayed OUTCOME
+    # for Task-2 labels, the replayed PLAYOUT for Task-6.5 labels. Either way
+    # it is an end-to-end check that generator and trainer agree on what each
+    # (game, ply, seat) row means. In the playout case it is also exactly why
+    # baseline 3 is 0.000 by definition (asserted below).
+    if is_distill:
+        assert np.max(np.abs(pred_po - true)) < 1e-6, (
+            "playout-label shards disagree with this script's independent "
+            "playout replay -- generator/trainer position mismatch")
+    else:
+        true_replay = gather_playout(truths_po, tegid, teply, teseat)
+        assert np.max(np.abs(true_replay - true)) < 1e-6, \
+            "replayed game outcomes disagree with the shard targets"
 
     is_heur = np.array([mixes[int(g)] == "heuristic" for g in tegid])
 
@@ -440,10 +494,20 @@ def main():
     c2 = overall["MLP (value net)"] < overall["baseline 3: 1 heuristic playout"]
     c2_rand = (rand_only["MLP (value net)"] <
                rand_only["baseline 3: 1 heuristic playout"])
+    gate65 = overall["MLP (value net)"] <= GATE_6_5_MSE
+    if is_distill:
+        assert overall["baseline 3: 1 heuristic playout"] < 1e-9, (
+            "baseline 3 must be exactly 0 against playout labels")
 
     lines = []
     A = lines.append
-    A("# Phase 4 Task 3: value net v1 training + pre-registered baselines")
+    A("# Phase 4 Task 3: value net training + pre-registered baselines"
+      + ("  [Task 6.5 DISTILLATION RUN: labels are full-playout scores]"
+         if is_distill else ""))
+    A(f"# data_dir={data_dir}  label_target={label_target}"
+      + ("  (each label = ONE kernel playout_to_end from that position, "
+         "the exact quantity search consumes -- 0 label noise)"
+         if is_distill else "  (labels = what actually happened in the game)"))
     A(f"# mode={'smoke' if args.smoke else 'full'} "
       f"wall_time_s={time.time() - t_start:.1f}")
     if args.smoke:
@@ -526,14 +590,42 @@ def main():
       f"({overall['MLP (value net)']:.4f} < "
       f"{overall['linear (ridge)']:.4f} < "
       f"{overall['constant (per-ply mean)']:.4f})")
-    A(f"  'MLP beats baseline 3 (one playout)': "
-      f"{'PASS' if c2 else 'FAIL'}  "
-      f"({overall['MLP (value net)']:.4f} vs "
-      f"{overall['baseline 3: 1 heuristic playout']:.4f})")
-    A(f"  [diagnostic, NOT the gate] same comparison on randomized-mix rows "
-      f"only: {'MLP better' if c2_rand else 'playout better'} "
-      f"({rand_only['MLP (value net)']:.4f} vs "
-      f"{rand_only['baseline 3: 1 heuristic playout']:.4f})")
+    if is_distill:
+        A("  'MLP beats baseline 3 (one playout)': N/A -- DEFINITIONALLY "
+          "UNWINNABLE ON THESE LABELS. Baseline 3 scores "
+          f"{overall['baseline 3: 1 heuristic playout']:.4f} (exactly zero, "
+          "asserted) because the label IS that playout. Stated, not "
+          "celebrated: it measures nothing about the net. Per "
+          "PHASE4_PLAN.md Task 6.5 the gate below replaces it.")
+        A(f"  [diagnostic] same comparison on randomized-mix rows only: "
+          f"also N/A ({rand_only['MLP (value net)']:.4f} vs "
+          f"{rand_only['baseline 3: 1 heuristic playout']:.4f} -- the "
+          "baseline is 0 on every row of both mixes here, not just the "
+          "heuristic ones)")
+        A("")
+        A("#" * 74)
+        A("## TASK 6.5 GATE 1 (pre-registered): imitation quality")
+        A("##   test MSE of the MLP on the evaluated seat's remaining points")
+        A(f"##   (overall column of the table above) <= {GATE_6_5_MSE:.1f}")
+        A(f"##   ACTUAL = {overall['MLP (value net)']:.4f}   ->   "
+          f"{'PASS' if gate65 else 'FAIL'}")
+        A("##   PASS -> proceed to gate 2 (rerun ablation4 rows 2-4 with "
+          "this model).")
+        A("##   FAIL -> stage 4A CLOSES with the strengthened null: the "
+          "playout's")
+        A("##          judgment is not representable by this function class "
+          "at this")
+        A("##          speed. No ablation rerun.")
+        A("#" * 74)
+    else:
+        A(f"  'MLP beats baseline 3 (one playout)': "
+          f"{'PASS' if c2 else 'FAIL'}  "
+          f"({overall['MLP (value net)']:.4f} vs "
+          f"{overall['baseline 3: 1 heuristic playout']:.4f})")
+        A(f"  [diagnostic, NOT the gate] same comparison on randomized-mix "
+          f"rows only: {'MLP better' if c2_rand else 'playout better'} "
+          f"({rand_only['MLP (value net)']:.4f} vs "
+          f"{rand_only['baseline 3: 1 heuristic playout']:.4f})")
     A("")
     A("## RECORDED PLAN CORRECTIONS (read before acting on the gate)")
     A("  (a) BASELINE 4 IS DEGENERATE. Heuristic playouts are deterministic "
@@ -543,6 +635,17 @@ def main():
       "variance the plan was reaching for comes from re-sampling different "
       "determinized worlds from the belief table (a search world-batch) -- "
       "that needs a belief state, i.e. Task 5, not this script.")
+    if is_distill:
+        A("  (b-6.5) BASELINE 3 IS THE LABEL. On playout-target data every "
+          "baseline-3 row is exactly the value being predicted, so its MSE "
+          "is 0.0000 on every mix. That is arithmetic, not evidence; it is "
+          "asserted here purely as a generator/trainer cross-check. Notes "
+          "(b) and (b2) below concern the outcome-label regime and do not "
+          "apply to this run. What DOES carry over: the heur/rand-mix split "
+          "still separates positions on the heuristic's own path from "
+          "positions it never reaches, which is the interesting axis for "
+          "whether the net imitates playouts off-policy -- read the rand-mix "
+          "column of the MLP row for that.")
     A("  (b) BASELINE 3 IS AN ORACLE ON THE HEURISTIC-MIX ROWS. Those games "
       "were played BY HeuristicPlayer and the kernel playout is a bitwise "
       "port of that same policy, so 'one playout from here' reproduces the "
@@ -578,6 +681,15 @@ def main():
                    "devices": dev_results, "device": device}, f, indent=2)
     make_plot(png_path, hist, buckets, order[:4])
     print(txt)
+    if is_distill:
+        print("=" * 74)
+        print(f"TASK 6.5 GATE 1: test MSE (evaluated seat, overall) = "
+              f"{overall['MLP (value net)']:.4f}  vs  gate <= "
+              f"{GATE_6_5_MSE:.1f}   ->   {'PASS' if gate65 else 'FAIL'}")
+        print("baseline 3 = 0.0000 BY DEFINITION here (the label IS the "
+              "playout); the pre-registered 'MLP beats baseline 3' criterion "
+              "is N/A, not FAIL.")
+        print("=" * 74)
     print(f"wrote {txt_path}, {png_path}, {ckpt}, {npz_path}")
 
 
