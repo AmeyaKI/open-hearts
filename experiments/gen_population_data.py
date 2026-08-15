@@ -168,14 +168,20 @@ def _epsilon_for(pid):
     return sample_personality(pid).epsilon
 
 
-def _table_for_seed(seed):
-    """4 distinct member ids from TRAIN_POOL, deterministic from `seed`.
+def _table_for_seed(seed, pool=None):
+    """4 distinct member ids from `pool` (default TRAIN_POOL), from `seed`.
 
     The sampled order IS the seat order: table[s] plays seat s.
+
+    `pool` was added by Phase 5 Task 3 (`experiments/train_profiler.py`) so
+    the held-out evaluation can draw HELD-OUT tables through this exact draw
+    rule instead of duplicating it. The default is TRAIN_POOL, so every
+    existing caller -- and every already-generated shard -- is untouched.
     """
+    members = TRAIN_POOL if pool is None else list(pool)
     rng = np.random.default_rng([int(seed), TABLE_SALT])
-    idx = rng.choice(len(TRAIN_POOL), size=4, replace=False)
-    return [TRAIN_POOL[int(i)] for i in idx]
+    idx = rng.choice(len(members), size=4, replace=False)
+    return [members[int(i)] for i in idx]
 
 
 def _split_for_seed(seed):
@@ -188,8 +194,19 @@ def _split_for_seed(seed):
 
 
 # ------------------------------------------------------------- one game
-def play_and_record(seed, return_raw=False):
+def play_and_record(seed, return_raw=False, pool=None,
+                    record_heuristic=False):
     """Play one game; return decision-event rows (multi-legal plies only).
+
+    `pool` / `record_heuristic` were added by Phase 5 Task 3 so
+    `experiments/train_profiler.py` can extract held-out-personality decision
+    events through THIS function rather than a copy of it. Both default to the
+    Task-2 behaviour exactly: `pool=None` means TRAIN_POOL, and
+    `record_heuristic=False` emits no extra column. With `record_heuristic`,
+    each row also carries the card a plain `HeuristicPlayer` would have played
+    from the same view (baseline 2's "heuristic match"); `HeuristicPlayer()`
+    is stateless and rng-free, so asking it cannot perturb the seated player's
+    random stream and the game plays out identically either way.
 
     Returns a dict of equal-length arrays: profiler_features float16[K,NF],
     legal_mask int64[K], chosen_card int8[K], acting_seat int8[K],
@@ -198,9 +215,11 @@ def play_and_record(seed, return_raw=False):
     the whole game) and `game_seed` are returned separately since they are
     per-GAME, not per-row.
     """
-    table = _table_for_seed(seed)
+    table = _table_for_seed(seed, pool)
     players = [_make_player(pid, seed, s) for s, pid in enumerate(table)]
     eps_by_seat = [_epsilon_for(pid) for pid in table]
+    href = HeuristicPlayer() if record_heuristic else None
+    heur_rows = []
 
     state = deal(np.random.default_rng(seed))
 
@@ -257,6 +276,8 @@ def play_and_record(seed, return_raw=False):
             seat_rows.append(seat)
             eps_rows.append(eps_by_seat[seat])
             ply_rows.append(p)
+            if href is not None:
+                heur_rows.append(href.choose(view))
 
         card = players[seat].choose(view)
         if n_legal > 1:
@@ -279,6 +300,8 @@ def play_and_record(seed, return_raw=False):
         epsilon=np.array(eps_rows, dtype=np.float32),
         ply=np.array(ply_rows, dtype=np.int8),
     )
+    if record_heuristic:
+        out["heuristic_card"] = np.array(heur_rows, dtype=np.int8)
     if return_raw:
         out["table"] = table
     return out, table
