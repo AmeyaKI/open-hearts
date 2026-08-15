@@ -115,6 +115,26 @@ class ProfilerLikelihood:
             return feats
         return np.concatenate([feats, self.seat_params[seat]])
 
+    def batch_probs(self, feat_rows, seats, masks):
+        """[N,52] masked choice distributions for N replayed opponent plies.
+
+        ADDITIVE SEAM (Phase 5 Task 5). `profiler_world_logweight` used to
+        inline exactly this body; it was lifted to a method so
+        `opponent.adapt.AdaptedLikelihood` can override the rows->probs step
+        with a per-seat MIXTURE (which needs the seat of each row, a thing
+        `row()` alone cannot express since it is called per row and the seat
+        is gone by the time the batch is assembled). The math here is
+        byte-identical to the previous inline version -- pinned by
+        `tests/test_profiled_search.py::_reference_logweight`, an independent
+        dense implementation.
+        """
+        rows = [self.row(f, s) for f, s in zip(feat_rows, seats)]
+        feats = np.ascontiguousarray(np.stack(rows), dtype=np.float64)
+        out = np.zeros((feats.shape[0], 52), dtype=np.float64)
+        profiler_probs_batch(*self.weights, feats,
+                             np.asarray(masks, dtype=np.int64), out)
+        return out
+
 
 def load_profiler_likelihood(path, seat_params=None) -> ProfilerLikelihood:
     """Load an `.npz` profiler into a `ProfilerLikelihood`."""
@@ -148,7 +168,7 @@ def profiler_world_logweight(view, world_hands, lik: ProfilerLikelihood,
     state.to_play = all_plays[0][0]
     observer = view.seat
 
-    rows, masks, obs_cards = [], [], []
+    rows, seats, masks, obs_cards = [], [], [], []
     for seat, card in all_plays:
         assert seat == state.to_play, (
             f"replay desync: observed seat {seat} != {state.to_play}")
@@ -159,17 +179,15 @@ def profiler_world_logweight(view, world_hands, lik: ProfilerLikelihood,
         if seat != observer:
             n_legal = bin(int(legal)).count("1")
             if n_legal > 1 or include_forced:
-                rows.append(lik.row(observer_features(state, seat), seat))
+                rows.append(observer_features(state, seat))
+                seats.append(seat)
                 masks.append(int(legal))
                 obs_cards.append(card)
         state.play(card)
 
     if not rows:
         return 0.0
-    feats = np.ascontiguousarray(np.stack(rows), dtype=np.float64)
-    out = np.zeros((feats.shape[0], 52), dtype=np.float64)
-    profiler_probs_batch(*lik.weights, feats,
-                         np.asarray(masks, dtype=np.int64), out)
+    out = lik.batch_probs(rows, seats, masks)
     total = 0.0
     for i, card in enumerate(obs_cards):
         p = float(out[i, card])
