@@ -102,6 +102,7 @@ from openhearts.engine.game import deal  # noqa: E402
 from openhearts.players.heuristic import HeuristicPlayer  # noqa: E402
 from openhearts.players.randomized import RandomizedHeuristic  # noqa: E402
 from openhearts.players.random_player import RandomPlayer  # noqa: E402
+from openhearts.opponent.obsfeat import observer_features  # noqa: E402
 from openhearts.players.personality import (  # noqa: E402
     ANCHOR_IDS, PersonalityPlayer, make_population, sample_personality)
 
@@ -239,32 +240,12 @@ def play_and_record(seed, return_raw=False, pool=None,
         n_legal = len(legal_list)
 
         if n_legal > 1:
-            hands = np.zeros(4, dtype=np.int64)
-            hands[seat] = state.hands[seat]  # only the acting seat's hand
-            pm = 0
-            for _s, c in state.history:
-                pm |= 1 << c
-            trick_cards = np.zeros(4, dtype=np.int64)
-            trick_seats = np.zeros(4, dtype=np.int64)
-            for i, (s, c) in enumerate(state.current_trick):
-                trick_cards[i] = c
-                trick_seats[i] = s
-                pm |= 1 << c
-            tl = len(state.current_trick)
-            led_suit, win_seat = -1, -1
-            if tl:
-                led = int(trick_cards[0]) // 13
-                wr = int(trick_cards[0]) % 13
-                ws = int(trick_seats[0])
-                for i in range(1, tl):
-                    c = int(trick_cards[i])
-                    if c // 13 == led and c % 13 > wr:
-                        wr, ws = c % 13, int(trick_seats[i])
-                led_suit, win_seat = led, ws
-            f = features.featurize(
-                hands, pm, trick_cards, trick_seats, tl, led_suit, win_seat,
-                state.hearts_broken, state.trick_number,
-                np.asarray(state.scores, dtype=np.int64), seat)
+            # Phase 5 Task 4 refactor: this block moved VERBATIM into
+            # `openhearts.opponent.obsfeat.observer_features` so the audit
+            # replay in `search/profiled.py` featurizes exactly as training
+            # did. Smoke output (rows, determinism, hidden-hand independence,
+            # decisions/game) is unchanged across the move.
+            f = observer_features(state, seat)
             # invariant check (cheap; hands array literally has no other
             # seat's cards, so this can never fail -- kept as a guard against
             # a future edit that changes the zeroing above).
