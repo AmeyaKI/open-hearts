@@ -66,6 +66,7 @@ Usage:
     python experiments/run_ablation5.py            # full run, LEAD ONLY
 """
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -121,7 +122,13 @@ MIRROR_OPP_CONFIG_ID = 9001
 
 ROW_NAMES = ["honest-FULL", "honest-CHOICE-strict", "honest-CHOICE-soft",
             "profiled-R", "profiled-RI", "profiled-RIA", "profiled-ORACLE",
-            "personality-mirror"]
+            "personality-mirror",
+            # Follow-up row (owner-approved 2026-08-13, appended so existing
+            # config ids stay stable): the true incumbent's constraint-only
+            # beliefs + Organ 2's profiled playouts. Tests whether RI's +0.28
+            # playout gain STACKS on FULL or was only repairing reading-
+            # induced belief damage.
+            "FULL-profiled-playouts"]
 ROW_CONFIG_ID = {name: 5100 + i for i, name in enumerate(ROW_NAMES)}
 
 BREAK_EVEN = 6.5
@@ -194,6 +201,13 @@ def build_bot(row_name, trio_ids, rng):
         return bot, (lambda s2p: None), {}
 
     generic_weights, _ = load_profiler(GENERIC_PATH)
+
+    if row_name == "FULL-profiled-playouts":
+        bot = ProfiledSearchPlayer(Level.FULL, N_OUTER, N_INNER, rng,
+                                   sampler_respects_voids=True,
+                                   posterior_factory=None,
+                                   playout_weights=generic_weights)
+        return bot, (lambda s2p: None), {}
 
     if row_name in ("profiled-R", "profiled-RI"):
         lik = ProfilerLikelihood(generic_weights)
@@ -352,7 +366,10 @@ def run_smoke():
     trios = block_trios(1)
     seeds = [DEAL_SEED_BASE + d for d in range(3)]
     print(f"[smoke] block trio: {trios[0]}", flush=True)
-    with open(PARTIAL, "w") as f:
+    # Smoke writes to its OWN partial path: it must never truncate a real
+    # run's checkpoint (learned the hard way, 2026-08-15).
+    smoke_partial = PARTIAL.replace(".txt", "_smoke.txt")
+    with open(smoke_partial, "w") as f:
         f.write(f"# smoke run start {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     for name in ROW_NAMES:
         t0 = time.time()
@@ -369,7 +386,7 @@ def run_smoke():
             print(f"[smoke] {name} identity-0 mixture final weights "
                   f"(top-5): {sorted(sample_weights, reverse=True)[:5]}",
                   flush=True)
-        with open(PARTIAL, "a") as f:
+        with open(smoke_partial, "a") as f:
             f.write(name + " " + " ".join(f"{v:.6f}" for v in per_deal) + "\n")
     print("[smoke] done", flush=True)
 
@@ -391,12 +408,42 @@ def total_rss_gb():
     return sum(int(x) for x in out.split()) / (1024 ** 2)
 
 
-def _append_partial(name, block_idx, values):
+def _append_partial(name, block_idx, values, cnt=None, diag=None, sw=None):
+    """Bank one completed chunk. JSON format (v2) carries everything the
+    report needs; the legacy space-separated format (values only) is still
+    read by `_load_partial` so pre-fix checkpoints can be restored."""
     os.makedirs(RESULTS, exist_ok=True)
+    payload = {"values": [float(v) for v in values], "cnt": cnt,
+              "diag": None if diag is None else [float(x) for x in diag],
+              "sw": None if sw is None else [float(x) for x in sw]}
     with open(PARTIAL, "a") as f:
-        f.write(f"{name}@{block_idx} " +
-               " ".join(f"{v:.6f}" for v in values) + "\n")
+        f.write(f"{name}@{block_idx} J{json.dumps(payload)}\n")
         f.flush()
+
+
+def _load_partial():
+    """-> dict[(name, block_idx)] = (values, cnt, diag, sw). Accepts both the
+    JSON (v2) format and the legacy values-only format (cnt/diag/sw None)."""
+    banked = {}
+    if not os.path.exists(PARTIAL):
+        return banked
+    with open(PARTIAL) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            head, rest = line.split(" ", 1)
+            name, b = head.rsplit("@", 1)
+            if name not in ROW_NAMES:
+                continue
+            if rest.startswith("J{"):
+                p = json.loads(rest[1:])
+                banked[(name, int(b))] = (np.array(p["values"]), p["cnt"],
+                                          p["diag"], p["sw"])
+            else:
+                vals = np.array([float(x) for x in rest.split()])
+                banked[(name, int(b))] = (vals, None, None, None)
+    return banked
 
 
 def run_all(n_deals, workers, trios):
@@ -406,10 +453,31 @@ def run_all(n_deals, workers, trios):
     counters = {name: [] for name in ROW_NAMES}
     diags = {name: np.zeros((n_blocks, 4)) for name in ("profiled-RI", "profiled-RIA")}
     sample_weights_last = {}
+    counters_missing = {name: 0 for name in ROW_NAMES}
+
+    banked = _load_partial()
+    for (name, b), (vals, cnt, diag, sw) in banked.items():
+        if b >= n_blocks or len(vals) != BLOCK_SIZE:
+            continue
+        results[name][b * BLOCK_SIZE:(b + 1) * BLOCK_SIZE] = vals
+        if cnt is not None:
+            counters[name].append(cnt)
+        else:
+            counters_missing[name] += 1
+        if diag is not None and name in diags:
+            diags[name][b] = diag
+        if sw is not None:
+            sample_weights_last[name] = sw
+    if banked:
+        print(f"[resume] {len(banked)} banked chunks loaded from {PARTIAL}; "
+              f"skipping them", flush=True)
+
     jobs = []
     with cf.ProcessPoolExecutor(max_workers=workers) as pool:
         for name in ROW_NAMES:
             for b in range(n_blocks):
+                if (name, b) in banked:
+                    continue
                 seeds = [DEAL_SEED_BASE + b * BLOCK_SIZE + d
                         for d in range(BLOCK_SIZE)]
                 jobs.append(pool.submit(worker, name, b, trios[b], seeds))
@@ -427,14 +495,14 @@ def run_all(n_deals, workers, trios):
             print(f"[{done}/{len(jobs)}] {name} block {b} done | "
                   f"mem={mem:.1f}GB | {time.time() - t0:.0f}s elapsed",
                   flush=True)
-            _append_partial(name, b, per_deal)
+            _append_partial(name, b, per_deal, cnt=cnt, diag=None if diag is None else list(diag), sw=None if sw is None else list(sw))
             if mem > MEM_LIMIT_GB:
                 print(f"ABORT: memory {mem:.1f}GB exceeds {MEM_LIMIT_GB}GB",
                       flush=True)
                 for j in jobs:
                     j.cancel()
                 raise MemoryError("memory limit exceeded")
-    return results, counters, diags, sample_weights_last
+    return results, counters, diags, sample_weights_last, counters_missing
 
 
 def sum_counters(clist):
@@ -561,6 +629,14 @@ def write_outputs(rows, n_deals, trios, s_per_game, elapsed, workers,
         lines.append(f"{name:<24}{r['mean']:>8.3f}{r['lo']:>9.3f}"
                      f"{r['hi']:>9.3f}{r['fallbacks']:>8}"
                      f"{r['failed_samples']:>9}{ifb:>9}{ifs:>9}{pc:>11}")
+    missing = {n: rows[n].get("counters_missing_blocks", 0) for n in ROW_NAMES}
+    if any(missing.values()):
+        lines.append(
+            "  NOTE: counter columns are PARTIAL for rows resumed from a "
+            "legacy (values-only) checkpoint — missing blocks per row: " +
+            ", ".join(f"{n}={m}" for n, m in missing.items() if m) +
+            ". Means/CIs/paired diffs are complete (values are banked for "
+            "every chunk); only the counter/diagnostic tallies are affected.")
 
     lines += ["", "paired per-deal diffs vs honest-CHOICE-soft (row - "
               "baseline; negative = row beats baseline), 95% paired "
@@ -650,10 +726,15 @@ def main():
             return
 
     trios = block_trios(n_deals // BLOCK_SIZE)
-    with open(PARTIAL, "w") as f:
-        f.write(f"# run start {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    if os.path.exists(PARTIAL) and _load_partial():
+        with open(PARTIAL, "a") as f:
+            f.write(f"# resume {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    else:
+        with open(PARTIAL, "w") as f:
+            f.write(f"# run start {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     t0 = time.time()
-    results, counters, diags, sample_weights_last = run_all(n_deals, args.workers, trios)
+    results, counters, diags, sample_weights_last, counters_missing = \
+        run_all(n_deals, args.workers, trios)
     elapsed = time.time() - t0
 
     rows = {}
@@ -666,7 +747,8 @@ def main():
                      "fallbacks": fb, "failed_samples": fs,
                      "inner_fallbacks": ifb if inner else None,
                      "inner_failed_samples": ifs if inner else None,
-                     "posterior": pc if inner else None}
+                     "posterior": pc if inner else None,
+                     "counters_missing_blocks": counters_missing.get(name, 0)}
     write_outputs(rows, n_deals, trios, s_per_game, elapsed, args.workers,
                  diags, sample_weights_last, note=note)
     print(f"[done] wall time {elapsed/60:.1f} min with {args.workers} workers",

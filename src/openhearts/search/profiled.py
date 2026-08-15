@@ -67,7 +67,7 @@ from ..belief.table import BeliefTable
 from ..belief.weighted import (PosteriorCollapse, WeightedPosterior,
                                _reconstruct_original_hands)
 from ..engine import cards, kernel
-from ..engine import kernel_profiled
+from ..engine import kernel_audit_profiled, kernel_profiled
 from ..engine.game import legal_moves
 from ..engine.state import GameState
 from ..opponent.infer import load_profiler, profiler_probs_batch
@@ -76,6 +76,45 @@ from ..sampler.sampler import sample_arrangement
 from .honest import HonestSearchPlayer
 
 NEG_INF = -np.inf
+
+#: Phase 5.5b. When True (and the JIT is on, and the likelihood is a plain
+#: GENERIC/CONDITIONED `ProfilerLikelihood`), `profiler_world_logweight` runs
+#: as ONE fused numba call -- replay + featurize + net + log accumulation --
+#: instead of the Python replay below. Set to False to force the Python path
+#: for testing WITHOUT touching `kernel.jit_enabled()`, which also selects the
+#: world SAMPLER in `profiler_posterior` and would therefore change the drawn
+#: worlds rather than just the arithmetic that scores them.
+FUSED_AUDIT = True
+
+
+def _fused_params(lik):
+    """The `[4, pd]` per-seat parameter block for the fused kernel, or None.
+
+    `None` means "not fusable, use the Python path". Two reasons to refuse:
+
+    * a SUBCLASS of `ProfilerLikelihood` -- notably
+      `opponent.adapt.AdaptedLikelihood`, which overrides `batch_probs` with a
+      per-seat MIXTURE over a pool. That is a different computation, not a
+      slower spelling of this one, and it stays Python this phase (5.5c's
+      problem). `type(...) is` rather than `isinstance` is deliberate.
+    A CONDITIONED likelihood is fusable, but `seat_params` need not cover all
+    four seats: `row()` is only ever called for OPPONENTS, so a mapping over
+    the three opponent seats is legitimate and the observer's slot is never
+    read. The kernel wants a dense `[4, pd]` array anyway, and zero-filling a
+    row we merely ASSUME is never read is the kind of silent divergence this
+    task exists to rule out -- so absent seats are filled with NaN, which
+    poisons the forward pass into the kernel's non-positive-probability status
+    and a loud raise. Fail-loud beats a plausible wrong number.
+    """
+    if type(lik) is not ProfilerLikelihood:
+        return None
+    if lik.seat_params is None:
+        return np.zeros((4, 0), dtype=np.float64)
+    pd = len(next(iter(lik.seat_params.values())))
+    params = np.full((4, pd), np.nan, dtype=np.float64)
+    for seat, vec in lik.seat_params.items():
+        params[int(seat)] = np.asarray(vec, dtype=np.float64)
+    return params
 
 
 class ProfilerLikelihood:
@@ -166,6 +205,18 @@ def profiler_world_logweight(view, world_hands, lik: ProfilerLikelihood,
     hands, all_plays = _reconstruct_original_hands(view, world_hands)
     if not all_plays:
         return 0.0  # no evidence yet: every world is equally consistent
+
+    # Phase 5.5b: one fused numba call for the whole replay. Every structural
+    # assert above stays on this side of the boundary; the loop below remains
+    # the reference and the NO_JIT path, byte-unchanged, and the two are pinned
+    # bitwise by `tests/test_fused_audit.py`.
+    if FUSED_AUDIT and kernel.jit_enabled():
+        params = _fused_params(lik)
+        if params is not None:
+            return kernel_audit_profiled.audit_world_logweight(
+                hands, all_plays, view.seat, lik.weights, lik.n_in,
+                params if params.shape[1] else None, include_forced)
+
     state = GameState(hands=hands)
     state.to_play = all_plays[0][0]
     observer = view.seat
