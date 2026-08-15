@@ -67,11 +67,13 @@ from ..belief.table import BeliefTable
 from ..belief.weighted import (PosteriorCollapse, WeightedPosterior,
                                _reconstruct_original_hands)
 from ..engine import cards, kernel
+from ..engine import kernel_profiled
 from ..engine.game import legal_moves
 from ..engine.state import GameState
 from ..opponent.infer import load_profiler, profiler_probs_batch
 from ..opponent.obsfeat import observer_features
 from ..sampler.sampler import sample_arrangement
+from .honest import HonestSearchPlayer
 
 NEG_INF = -np.inf
 
@@ -277,7 +279,8 @@ def profiler_posterior(view, level, lik: ProfilerLikelihood, n_worlds: int,
 
 
 def profiler_posterior_factory(weights, seat_params=None, meta=None,
-                               level=None, n_worlds=100, max_draws=50000):
+                               level=None, n_worlds=100, max_draws=50000,
+                               keep_worlds=False):
     """-> `f(view, rng, **overrides) -> WeightedPosterior`.
 
     The factory the plan names. `weights` is either a loaded 6-tuple, a
@@ -293,10 +296,162 @@ def profiler_posterior_factory(weights, seat_params=None, meta=None,
         lik = ProfilerLikelihood(weights, seat_params, meta)
 
     def make(view, rng, level=level, n_worlds=n_worlds, max_draws=max_draws,
-             keep_worlds=False):
+             keep_worlds=keep_worlds):
         assert level is not None, "no belief level: pass level= to the factory"
         return profiler_posterior(view, level, lik, n_worlds, rng, max_draws,
                                   keep_worlds=keep_worlds)
 
     make.likelihood = lik
     return make
+
+
+# ==========================================================================
+# Phase 5 Task 6: Organ 2 -- model-driven playouts
+# ==========================================================================
+class ProfiledSearchPlayer(HonestSearchPlayer):
+    """Honest search with a profiler READER and (optionally) profiler ACTORS.
+
+    Three configurations, all built from this one class -- the ablation rows
+    the plan names:
+
+    =========  ================================  ==========================
+    row        posterior_factory                 playout_weights
+    =========  ================================  ==========================
+    ``R``      profiler (GENERIC likelihood)     ``None``  -> heuristic
+    ``RI``     profiler (GENERIC likelihood)     GENERIC 6-tuple
+    ``RIA``    profiler w/ `AdaptedLikelihood`   GENERIC 6-tuple
+    =========  ================================  ==========================
+
+    `playout_weights` is a GENERIC profiler weight 6-tuple (as returned by
+    `opponent.infer.load_profiler`); `None` keeps `HonestSearchPlayer`'s
+    heuristic playouts EXACTLY (delegated to `super()._playout`, so the R row
+    is the Task-4 player plus nothing).
+
+    WHICH PLAYOUTS ARE PROFILED (decide-and-state, not silent). The OUTER
+    playout -- both segments, run-to-our-decision and finish -- uses the
+    profiled kernel. The INNER re-determinization (`self._inner`, a Phase-1
+    `SearchPlayer`) keeps its plain heuristic playouts. Rationale: the inner
+    search runs once per (outer world x outer candidate), so profiling it too
+    would multiply net calls by roughly `n_inner x n_candidates`; the measured
+    cost of that variant is reported to the lead rather than adopted. `RI`
+    therefore means "model-driven OUTER playouts". Anyone changing this must
+    change the row's meaning in the plan too.
+
+    RNG. `choose` draws ONE integer from `self.rng` per decision and seeds the
+    kernel sampler with it (`kernel_profiled.seed_playouts`). Deterministic
+    given the player's seed; NOT the same stream as `HonestSearchPlayer`'s,
+    and not the same between JIT and NO_JIT -- the Phase-2.6 precedent,
+    documented in `kernel_profiled`'s docstring.
+
+    ADAPTATION HOOKS (`RIA`), contract for the harness -- READ BEFORE WIRING.
+    `SeatMixture` is keyed by ABSOLUTE SEAT while the belief it accumulates is
+    about a PERSONALITY (Task 5's recorded trap). The harness therefore MUST:
+
+    * call `player.observe_hand(history)` after EVERY completed hand of a
+      match, passing the full 52-ply `[(seat, card), ...]` history -- this
+      updates every opponent seat's mixture from that hand's decision events
+      (`events_from_history` is called ONCE and its rows dispatched per seat,
+      not once per seat);
+    * call `player.reset_mixtures()` whenever the occupants of the seats
+      change (a new deal with rotated/redrawn personalities), and
+      `player.reset_seat(seat)` for a single reseat;
+    * NEVER reset between hands of the same match -- accumulating across hands
+      IS the effect being measured.
+
+    Forgetting the reset does not raise; it silently reads the previous
+    opponent. `observe_hand` is a no-op for R/RI (no `AdaptedLikelihood`), so
+    a harness may call it unconditionally.
+
+    OPEN DESIGN QUESTION FOR THE ABLATION SCRIPT (raised by Task 6's wiring,
+    for the lead to decide -- NOT decided here). The plan runs "trios rotated
+    across deals". Combined with the reset-on-reseat rule above, that makes
+    every deal a fresh identity: the mixture sits at its uniform prior for the
+    whole hand (`observe_hand` can only fire once the hand is over) and is then
+    reset. Under that deal structure `profiled-RIA` is `profiled-RI` plus the
+    adapted audit's cost and ZERO adaptation -- structurally, not empirically.
+    Task 5 measured N=9 hands to concentrate weight and a benefit "from hand 3
+    on", so one discarded hand of evidence is nothing. Making the RIA row mean
+    what the plan intends requires deals BLOCKED INTO MATCHES: one trio held
+    fixed for a run of consecutive deals, `reset_mixtures()` only at block
+    boundaries, with the block assignment derived from the deal index so it is
+    identical across all eight rows and the paired per-deal bootstrap is
+    unaffected.
+    """
+
+    def __init__(self, level, n_outer, n_inner, rng,
+                 sampler_respects_voids=True, jit_sampler=True,
+                 posterior_factory=None, playout_weights=None):
+        super().__init__(level, n_outer, n_inner, rng, sampler_respects_voids,
+                         jit_sampler, posterior_factory)
+        if playout_weights is not None:
+            playout_weights = tuple(playout_weights)
+            assert len(playout_weights) == 6, (
+                "playout_weights must be the 6-tuple from load_profiler")
+            n_in = int(playout_weights[0].shape[0])
+            from ..engine.features import NF as _NF
+            assert n_in == _NF, (
+                f"playout profiler must be GENERIC (n_in == NF == {_NF}), got "
+                f"{n_in}: the in-kernel featurizer builds observer features "
+                f"only, with no personality block to append")
+        self.playout_weights = playout_weights
+        self.playout_mode = kernel_profiled.MODE_PROFILER
+
+    # ------------------------------------------------------------ playouts
+    def choose(self, view):
+        if self.playout_weights is not None:
+            kernel_profiled.seed_playouts(int(self.rng.integers(2 ** 63)))
+        return super().choose(view)
+
+    def _playout(self, state, our_seat: int) -> None:
+        if self.playout_weights is None:
+            super()._playout(state, our_seat)
+            return
+        w = self.playout_weights
+        if self.n_inner > 0:
+            if kernel_profiled.run_playout_until_decision_profiled(
+                    state, our_seat, our_seat, w, self.playout_mode):
+                state.play(self._inner.choose(state.view_for(our_seat)))
+        kernel_profiled.run_playout_profiled(state, our_seat, w,
+                                             self.playout_mode)
+
+    # -------------------------------------------------------- adaptation
+    @property
+    def _adapted(self):
+        """The `AdaptedLikelihood` behind the posterior factory, or None."""
+        lik = getattr(self.posterior_factory, "likelihood", None)
+        return lik if hasattr(lik, "mixtures") else None
+
+    def observe_hand(self, history) -> int:
+        """Feed one COMPLETED hand to every opponent seat's mixture.
+
+        Returns the number of seats updated (0 for R/RI). `events_from_history`
+        runs ONCE for the whole hand and its rows are sliced per seat.
+        """
+        lik = self._adapted
+        if lik is None or not lik.mixtures:
+            return 0
+        from ..opponent.adapt import events_from_history
+
+        seats, feats, masks, chosen = events_from_history(history)
+        seats = np.asarray(seats, dtype=np.int64)
+        n = 0
+        for seat, mix in lik.mixtures.items():
+            sel = np.flatnonzero(seats == int(seat))
+            if sel.size:
+                mix.observe(feats[sel], masks[sel], chosen[sel])
+            mix.n_hands += 1
+            n += 1
+        return n
+
+    def reset_seat(self, seat) -> None:
+        """Forget everything learned about `seat` (its occupant changed)."""
+        lik = self._adapted
+        if lik is not None and int(seat) in lik.mixtures:
+            lik.mixtures[int(seat)].reset()
+
+    def reset_mixtures(self) -> None:
+        """Forget every seat -- call on ANY reseat of the table."""
+        lik = self._adapted
+        if lik is not None:
+            for mix in lik.mixtures.values():
+                mix.reset()
