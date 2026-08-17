@@ -92,8 +92,22 @@ PARAM_DIM = _N_PERSONALITY + N_ANCHOR
 ANCHOR_ORDER = tuple(ANCHOR_IDS.keys())
 _ANCHOR_SLOT = {ANCHOR_IDS[name]: i for i, name in enumerate(ANCHOR_ORDER)}
 
-assert set(_SCALAR_NORM) | {"q_posture", "suit_quirk"} == set(PARAM_FIELDS), (
-    "params.py's layout is out of sync with PersonalityParams' fields")
+# The PROFILER_V=1 field set, PINNED.  `models/profiler_v1.npz` was trained
+# with an input width of NF + PARAM_DIM = NF + 20; appending a personality axis
+# (Phase 6's Task A1 appends three) must NOT silently change that width or the
+# trained weights stop matching their own input.  So the tripwire is a PREFIX
+# check, not an equality: v1's fields must remain the first fields of
+# `PersonalityParams`, in order, and anything appended after them is invisible
+# to PROFILER_V=1 by design.  A future PROFILER_V=2 that wants the new axes
+# must extend this list deliberately and retrain.
+_V1_FIELDS = ("duck", "hoard", "q_posture", "q_strength", "lead_short",
+              "lead_long", "lead_heart", "heart_dump", "suit_quirk", "danger",
+              "temperature", "epsilon")
+assert PARAM_FIELDS[:len(_V1_FIELDS)] == _V1_FIELDS, (
+    "PersonalityParams' frozen draw order changed: PROFILER_V=1's parameter "
+    "vector is no longer a prefix of it")
+assert set(_SCALAR_NORM) | {"q_posture", "suit_quirk"} == set(_V1_FIELDS), (
+    "params.py's layout is out of sync with the pinned PROFILER_V=1 fields")
 
 
 def param_vector(pid: int) -> np.ndarray:
@@ -105,7 +119,7 @@ def param_vector(pid: int) -> np.ndarray:
         return v
     p = sample_personality(pid)
     i = 0
-    for name in PARAM_FIELDS:
+    for name in _V1_FIELDS:
         if name == "q_posture":
             v[i + Q_POSTURES.index(p.q_posture)] = 1.0
             i += len(Q_POSTURES)
