@@ -60,11 +60,45 @@ deliberately NOT written into idx 16: that slot's normalization is calibrated
 to the personality range 0.03..0.25, and 1.0 would map to +3.4, an outlier in
 a column whose other entries live in [0, 1].  The one-hot already identifies
 each anchor uniquely, epsilon included.
+
+PHASE 6 (Task A2) — THE PROFILER_V2 PARAMETER VECTOR
+----------------------------------------------------
+`param_vector_v2(pid, habit)` is a SECOND, INDEPENDENT contract used only by
+the Phase-6 v2 profiler (`results/profiler_train_v2/`). It exists because the
+v2 population differs from v1 in two ways the v1 vector structurally cannot
+express:
+
+  * three appended personality axes (`safe_dump`, `void_engineer`,
+    `feed_leader`), and
+  * epsilon/temperature that have been HABIT-TRANSFORMED, so the same
+    personality id means four different levels of predictability.  The
+    CONDITIONED v2 net is told the values ACTUALLY IN EFFECT (post-transform),
+    which is the whole point of the curve: the ORACLE row's advantage at H0
+    must include "this opponent is nearly deterministic".
+
+    PARAM_DIM_V2 = PARAM_DIM + 3 = 23
+
+The v1 20-slot layout is kept as an exact structural PREFIX (same slots in the
+same order, anchor one-hot included and always zero — v2 tables are
+personalities only, never anchors), with the three new axes appended.  The
+DIMENSION DELIBERATELY DIFFERS from v1's: a v1 CONDITIONED net fed v2 vectors
+would then fail on shape rather than silently consuming a wrong-meaning input.
+That shape mismatch IS the tripwire; do not "fix" it by padding to 20.
+
+Two normalizations differ from v1's, because the ranges differ:
+
+    temperature  union of all four habit bands, 0.10 .. 2.50  -> (x-0.10)/2.40
+    epsilon      union of all four habit bands, 0.005 .. 0.45 -> (x-0.005)/0.445
+
+`_SCALAR_NORM` itself is NOT mutated: `param_vector` still feeds the frozen
+`models/profiler_v1.npz`, and changing its scaling would silently invalidate
+every Phase-5 number.
 """
 import numpy as np
 
-from ..players.personality import (ANCHOR_IDS, PARAM_FIELDS, Q_POSTURES,
-                                   sample_personality)
+from ..players.personality import (ANCHOR_IDS, HABIT_SETTINGS, NEW_AXES_V2,
+                                   PARAM_FIELDS, Q_POSTURES,
+                                   sample_personality, sample_personality_v2)
 
 N_ANCHOR = len(ANCHOR_IDS)
 # scalar axes, in dataclass/draw order, with their (offset, scale):
@@ -142,3 +176,77 @@ def param_table(pids) -> dict:
     personality from its seed per row would dominate featurization cost.
     """
     return {int(p): param_vector(p) for p in pids}
+
+
+# ===========================================================================
+# PROFILER_V2 (Phase 6 Task A2).  See the module docstring's PHASE 6 section.
+# ===========================================================================
+PARAM_DIM_V2 = PARAM_DIM + len(NEW_AXES_V2)
+
+# The union of every habit band, so one normalization covers all four dial
+# settings and an H0 epsilon is not an outlier in a column calibrated to H2.
+_V2_TEMP_RANGE = (min(b["temperature"][0] for b in HABIT_SETTINGS.values()),
+                  max(b["temperature"][1] for b in HABIT_SETTINGS.values()))
+_V2_EPS_RANGE = (min(b["epsilon"][0] for b in HABIT_SETTINGS.values()),
+                 max(b["epsilon"][1] for b in HABIT_SETTINGS.values()))
+_SCALAR_NORM_V2 = dict(
+    _SCALAR_NORM,
+    temperature=(_V2_TEMP_RANGE[0], _V2_TEMP_RANGE[1] - _V2_TEMP_RANGE[0]),
+    epsilon=(_V2_EPS_RANGE[0], _V2_EPS_RANGE[1] - _V2_EPS_RANGE[0]),
+)
+# Appended axes, in `NEW_AXES_V2` order, with their (offset, scale) — the
+# same "~[0,1], Gaussians on ~[-0.5,0.5]" rule the v1 layout uses.
+#   safe_dump      Uniform(-1.2, 2.6)   -> (x + 1.2) / 3.8
+#   void_engineer  Normal(0.4, 1.3)     -> (x - 0.4) / 3.9   (~3 sigma)
+#   feed_leader    Uniform(-1.5, 1.5)   -> x / 3.0
+_NEW_AXIS_NORM = {"safe_dump": (-1.2, 3.8), "void_engineer": (0.4, 3.9),
+                  "feed_leader": (0.0, 3.0)}
+assert tuple(_NEW_AXIS_NORM) == NEW_AXES_V2, (
+    "params.py's v2 axis order is out of sync with personality.NEW_AXES_V2")
+assert PARAM_FIELDS[len(_V1_FIELDS):] == NEW_AXES_V2, (
+    "PersonalityParams gained an axis PROFILER_V2 does not vectorize")
+
+
+def param_vector_v2(pid: int, habit: str) -> np.ndarray:
+    """float64[PARAM_DIM_V2] for a v2 personality at one habit setting.
+
+    Slots 0..PARAM_DIM-1 mirror v1's layout exactly (the 3 anchor slots stay
+    zero: v2 populations contain no anchors), with v2's epsilon/temperature
+    normalization; slots PARAM_DIM.. carry the three appended axes.
+
+    `habit` is REQUIRED and part of the key: the same id is a different player
+    at each dial setting, and the vector reports the epsilon/temperature
+    ACTUALLY IN EFFECT after the habit transform.
+    """
+    assert habit in HABIT_SETTINGS, f"unknown habit setting {habit!r}"
+    assert int(pid) > 0, (
+        f"anchor id {pid} has no v2 personality; v2 populations are "
+        "personalities only")
+    p = sample_personality_v2(int(pid), habit)
+    v = np.zeros(PARAM_DIM_V2, dtype=np.float64)
+    i = 0
+    for name in _V1_FIELDS:
+        if name == "q_posture":
+            v[i + Q_POSTURES.index(p.q_posture)] = 1.0
+            i += len(Q_POSTURES)
+        elif name == "suit_quirk":
+            for k, x in enumerate(p.suit_quirk):
+                v[i + k] = float(x) / _QUIRK_SCALE
+            i += 4
+        else:
+            off, scale = _SCALAR_NORM_V2[name]
+            v[i] = (float(getattr(p, name)) - off) / scale
+            i += 1
+    assert i == _N_PERSONALITY
+    i = PARAM_DIM                      # skip the (always-zero) anchor block
+    for name in NEW_AXES_V2:
+        off, scale = _NEW_AXIS_NORM[name]
+        v[i] = (float(getattr(p, name)) - off) / scale
+        i += 1
+    assert i == PARAM_DIM_V2
+    return v
+
+
+def param_table_v2(pids, habit: str) -> dict:
+    """{pid: float64[PARAM_DIM_V2]} for one pool at one habit setting."""
+    return {int(p): param_vector_v2(p, habit) for p in pids}

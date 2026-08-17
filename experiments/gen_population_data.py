@@ -83,9 +83,43 @@ seat), so the "~1/4 the width" framing in the task brief nets out to a
 similarly small total footprint; see the printed projection for the actual
 number.
 
+PHASE 6 (Task A2) -- THE V2 MODE
+--------------------------------
+`--v2` generates choice events from the PHASE-6 v2 population instead of the
+Phase-5 one.  Everything above still holds -- same row unit, same
+PROFILER_FEATURES_V=1 featurization, same held-out wall, same shard schema
+plus ONE new column -- and every v1 default is untouched, so re-running the
+plain script reproduces the Phase-5 shards bit for bit.
+
+What differs, all pre-registered here:
+
+  * POOL: `make_population_v2()`'s 200 TRAIN ids (`personality.py`,
+    MASTER_SEED_V2 = 606060), asserted disjoint from the 50 v2 HELD-OUT ids.
+    NO ANCHORS.  Anchors are v1 families (the plain heuristic, a randomized
+    heuristic, a uniform player); the v2 population's job is to span STRATEGY
+    space at four predictability levels, and a uniform player is simply H3
+    taken to its limit.  Their absence is also what lets the v2 CONDITIONED
+    parameter vector drop the anchor one-hot's meaning (`params.param_vector_v2`).
+  * HABIT MIX: each game is played at ONE dial setting, drawn per game as
+    `default_rng([seed, HABIT_SALT]).integers(4)` -> H0/H1/H2/H3 at 25% each.
+    Drawn rather than `seed % 4` deliberately: `seed % 4` is correlated with
+    the `seed % 100` train/val/test split rule, which would give the splits
+    different habit compositions.  The setting is RECORDED PER ROW (`habit`,
+    int8 index into `HABIT_ORDER`) because every downstream diagnostic is
+    per-setting, and because the CONDITIONED v2 net's parameter vector is a
+    function of (personality id, habit) -- the same id is four different
+    players.
+  * SEEDS: `V2_SEED_BASE = 1_300_000`, a fresh block above every range this
+    project has used (100000+ evaluation deals, 700000..899999 Phase-5
+    training, 950000+ Task-3 held-out, 960000+ Task-4 guessing).
+  * OUTPUT: `results/population_data_v2/`.  The Phase-5 shards are never
+    read, written, or moved.
+
 Usage:
   .venv/bin/python experiments/gen_population_data.py --smoke
   .venv/bin/python experiments/gen_population_data.py --games 200000
+  .venv/bin/python experiments/gen_population_data.py --v2 --smoke
+  .venv/bin/python experiments/gen_population_data.py --v2 --games 127000
 """
 import argparse
 import os
@@ -104,10 +138,12 @@ from openhearts.players.randomized import RandomizedHeuristic  # noqa: E402
 from openhearts.players.random_player import RandomPlayer  # noqa: E402
 from openhearts.opponent.obsfeat import observer_features  # noqa: E402
 from openhearts.players.personality import (  # noqa: E402
-    ANCHOR_IDS, PersonalityPlayer, make_population, sample_personality)
+    ANCHOR_IDS, HABIT_ORDER, HABIT_SETTINGS, PersonalityPlayer, make_population,
+    make_population_v2, sample_personality, sample_personality_v2)
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "..", "results")
 OUT_DIR = os.path.join(RESULTS_DIR, "population_data")
+OUT_DIR_V2 = os.path.join(RESULTS_DIR, "population_data_v2")
 
 SEED_BASE = 700000            # plan: population-TRAINING seed range
 MASTER_SEED = 314159          # Task 1's make_population seed, fixed here for
@@ -124,6 +160,25 @@ TABLE_SALT = 777              # salts table-draw rng away from the deal rng
 PLIES_PER_GAME = 52
 SHARD_ROWS = 250_000
 SMOKE_GAMES = 200
+
+# --- Phase 6 (Task A2) v2 constants; see the module docstring's V2 section --
+V2_SEED_BASE = 1_300_000
+HABIT_SALT = 4242             # salts the per-game habit draw away from the
+                              # deal rng, the table rng and the player rngs.
+V2_TRAIN_IDS, V2_HELDOUT_IDS = make_population_v2()
+V2_HELDOUT_SET = frozenset(V2_HELDOUT_IDS)
+V2_POOL = list(V2_TRAIN_IDS)  # NO anchors -- see the docstring
+assert V2_HELDOUT_SET.isdisjoint(V2_POOL), (
+    "v2 held-out ids leaked into the v2 train pool")
+# Smoke must emit >= 2 train + 1 val shard so `train_profiler.py --smoke`
+# (which slices tr_paths[:2] / va_paths[:1]) has something to chew on.
+SMOKE_SHARD_ROWS = 2_000
+
+
+def habit_for_seed(seed):
+    """The dial setting this game is played at (v2 only).  25% each."""
+    i = int(np.random.default_rng([int(seed), HABIT_SALT]).integers(4))
+    return HABIT_ORDER[i]
 
 # Anchor id -> convention epsilon, per the task spec ("anchors: heuristic=0.0,
 # randomized=0.1, random=1.0 by convention -- document").
@@ -145,12 +200,16 @@ assert HELDOUT_SET.isdisjoint(TRAIN_POOL), (
 
 
 # --------------------------------------------------------------- players
-def _make_player(pid, seed, seat):
+def _make_player(pid, seed, seat, habit=None):
     """Instantiate the player for personality/anchor id `pid` at (seed, seat).
 
     Each seated player gets its OWN rng stream keyed off (seed, seat, a
     per-role salt) so re-seating the same id at a different table never
     reuses another seat's randomness.
+
+    `habit=None` is the Phase-5 path, bit-identical (v1 `sample_personality`).
+    A habit setting selects `sample_personality_v2` instead -- same rng stream
+    derivation, so a v2 seat consumes randomness exactly as a v1 seat does.
     """
     rng = np.random.default_rng([int(seed), int(seat), 0xA1CE])
     if pid == ANCHOR_IDS["heuristic"]:
@@ -159,14 +218,18 @@ def _make_player(pid, seed, seat):
         return RandomizedHeuristic(rng, epsilon=0.1)
     if pid == ANCHOR_IDS["random"]:
         return RandomPlayer(rng)
-    params = sample_personality(pid)
+    params = (sample_personality(pid) if habit is None
+              else sample_personality_v2(pid, habit))
     return PersonalityPlayer(rng, params)
 
 
-def _epsilon_for(pid):
+def _epsilon_for(pid, habit=None):
+    """The recorded epsilon: for v2 this is the HABIT-TRANSFORMED value, i.e.
+    the deviation rate actually in effect, not the pre-transform draw."""
     if pid in ANCHOR_EPSILON:
         return ANCHOR_EPSILON[pid]
-    return sample_personality(pid).epsilon
+    return (sample_personality(pid) if habit is None
+            else sample_personality_v2(pid, habit)).epsilon
 
 
 def _table_for_seed(seed, pool=None):
@@ -196,7 +259,7 @@ def _split_for_seed(seed):
 
 # ------------------------------------------------------------- one game
 def play_and_record(seed, return_raw=False, pool=None,
-                    record_heuristic=False):
+                    record_heuristic=False, habit=None):
     """Play one game; return decision-event rows (multi-legal plies only).
 
     `pool` / `record_heuristic` were added by Phase 5 Task 3 so
@@ -217,8 +280,8 @@ def play_and_record(seed, return_raw=False, pool=None,
     per-GAME, not per-row.
     """
     table = _table_for_seed(seed, pool)
-    players = [_make_player(pid, seed, s) for s, pid in enumerate(table)]
-    eps_by_seat = [_epsilon_for(pid) for pid in table]
+    players = [_make_player(pid, seed, s, habit) for s, pid in enumerate(table)]
+    eps_by_seat = [_epsilon_for(pid, habit) for pid in table]
     href = HeuristicPlayer() if record_heuristic else None
     heur_rows = []
 
@@ -288,7 +351,8 @@ def play_and_record(seed, return_raw=False, pool=None,
     return out, table
 
 
-def verify_hidden_hand_independence(seeds, n_checks_per_game=8):
+def verify_hidden_hand_independence(seeds, n_checks_per_game=8, pool=None,
+                                    habit_fn=None):
     """No hidden-hand information ever enters a PROFILER_FEATURES_V=1 row.
 
     For a handful of decision plies, construct TWO different, both-valid
@@ -307,8 +371,10 @@ def verify_hidden_hand_independence(seeds, n_checks_per_game=8):
     n_checked = 0
     hb0, hb1 = features.OFF_HANDS + 52, features.OFF_HANDS + 208
     for seed in seeds:
-        table = _table_for_seed(seed)
-        players = [_make_player(pid, seed, s) for s, pid in enumerate(table)]
+        table = _table_for_seed(seed, pool)
+        habit = habit_fn(seed) if habit_fn else None
+        players = [_make_player(pid, seed, s, habit)
+                   for s, pid in enumerate(table)]
         state = deal(np.random.default_rng(seed))
         checked_this_game = 0
         p = 0
@@ -416,10 +482,14 @@ def verify_hidden_hand_independence(seeds, n_checks_per_game=8):
 class ShardWriter:
     """Buffers rows for one split and flushes ~SHARD_ROWS-row .npz files."""
 
-    def __init__(self, out_dir, split, meta):
+    def __init__(self, out_dir, split, meta, record_habit=False,
+                 shard_rows=SHARD_ROWS):
         self.out_dir = out_dir
         self.split = split
         self.meta = meta
+        self.record_habit = record_habit   # v2 only; v1 shards keep their
+                                           # exact Phase-5 key set
+        self.shard_rows = shard_rows
         self.shard_idx = 0
         self._reset()
 
@@ -432,12 +502,16 @@ class ShardWriter:
         self.epsilon = []
         self.game_seed = []
         self.ply = []
+        self.habit = []
         self.n = 0
 
-    def add_game(self, seed, table, rows):
+    def add_game(self, seed, table, rows, habit_idx=None):
         n_rows = rows["chosen_card"].shape[0]
         if n_rows == 0:
             return
+        if self.record_habit:
+            assert habit_idx is not None, "v2 shards must record a habit"
+            self.habit.append(np.full(n_rows, habit_idx, dtype=np.int8))
         self.profiler_features.append(rows["profiler_features"])
         self.legal_mask.append(rows["legal_mask"])
         self.chosen_card.append(rows["chosen_card"])
@@ -448,7 +522,7 @@ class ShardWriter:
         self.game_seed.append(np.full(n_rows, seed, dtype=np.int32))
         self.ply.append(rows["ply"])
         self.n += n_rows
-        if self.n >= SHARD_ROWS:
+        if self.n >= self.shard_rows:
             self.flush()
 
     def flush(self):
@@ -465,9 +539,13 @@ class ShardWriter:
         path = os.path.join(
             self.out_dir, f"pop_{self.split}_{self.shard_idx:05d}.npz")
         shard_meta = dict(self.meta, split=self.split)
+        extra = {}
+        if self.record_habit:
+            extra["habit"] = np.concatenate(self.habit)
         np.savez(path, profiler_features=pf, legal_mask=lm, chosen_card=cc,
                  personality_ids=pid, acting_seat=seat, epsilon=eps,
-                 game_seed=gs, ply=ply, meta=np.array(shard_meta, dtype=object))
+                 game_seed=gs, ply=ply, meta=np.array(shard_meta, dtype=object),
+                 **extra)
         self.shard_idx += 1
         self._reset()
         return path
@@ -484,19 +562,31 @@ def _git_hash():
         return "unknown"
 
 
-def generate(n_games, out_dir, progress_every=1000):
+def generate(n_games, out_dir, progress_every=1000, v2=False,
+             shard_rows=SHARD_ROWS):
     os.makedirs(out_dir, exist_ok=True)
+    seed_base = V2_SEED_BASE if v2 else SEED_BASE
+    pool = V2_POOL if v2 else None
     meta = {
-        "seed_base": SEED_BASE,
+        "seed_base": seed_base,
         "n_games": n_games,
-        "seed_range": [SEED_BASE, SEED_BASE + n_games - 1],
-        "master_seed": MASTER_SEED,
-        "n_train_personalities": N_TRAIN_PERSONALITIES,
-        "n_heldout_personalities": N_HELDOUT_PERSONALITIES,
+        "seed_range": [seed_base, seed_base + n_games - 1],
+        "master_seed": MASTER_SEED if not v2 else 606060,
+        "n_train_personalities": (N_TRAIN_PERSONALITIES if not v2
+                                  else len(V2_POOL)),
+        "n_heldout_personalities": (N_HELDOUT_PERSONALITIES if not v2
+                                    else len(V2_HELDOUT_SET)),
+        "population_v": 2 if v2 else 1,
+        "habit_rule": ("one dial setting per game, "
+                       "HABIT_ORDER[default_rng([seed, HABIT_SALT])"
+                       ".integers(4)] -- 25% each, recorded per row"
+                       if v2 else "n/a (v1 population)"),
         "table_rule": "4 distinct ids drawn without replacement from "
-                      "TRAIN_POOL (200 personalities + 3 anchors) via "
-                      "np.random.default_rng([seed, TABLE_SALT]); sampled "
-                      "order is seat order",
+                      + ("V2_POOL (200 v2 TRAIN personalities, NO anchors) "
+                         if v2 else
+                         "TRAIN_POOL (200 personalities + 3 anchors) ")
+                      + "via np.random.default_rng([seed, TABLE_SALT]); "
+                        "sampled order is seat order",
         "row_unit": "one row per multi-legal decision event (single-legal "
                     "plies excluded)",
         "epsilon_convention": "personality: params.epsilon; "
@@ -509,16 +599,25 @@ def generate(n_games, out_dir, progress_every=1000):
         "git_hash": _git_hash(),
         "plies_per_game": PLIES_PER_GAME,
     }
-    writers = {s: ShardWriter(out_dir, s, meta)
+    writers = {s: ShardWriter(out_dir, s, meta, record_habit=v2,
+                              shard_rows=shard_rows)
               for s in ("train", "val", "test")}
     n_rows = 0
     n_decisions_total = 0
+    habit_games = {h: 0 for h in HABIT_ORDER}
     t0 = time.time()
     for i in range(n_games):
-        seed = SEED_BASE + i
-        rows, table = play_and_record(seed)
+        seed = seed_base + i
+        habit = habit_for_seed(seed) if v2 else None
+        rows, table = play_and_record(seed, pool=pool, habit=habit)
+        if v2:
+            habit_games[habit] += 1
+            assert not (set(table) & V2_HELDOUT_SET), (
+                f"seed {seed}: v2 held-out id at a training table: {table}")
         split = _split_for_seed(seed)
-        writers[split].add_game(seed, table, rows)
+        writers[split].add_game(
+            seed, table, rows,
+            habit_idx=None if not v2 else HABIT_ORDER.index(habit))
         n_rows += rows["chosen_card"].shape[0]
         n_decisions_total += rows["chosen_card"].shape[0]
         if (i + 1) % progress_every == 0 or (i + 1) == n_games:
@@ -531,6 +630,7 @@ def generate(n_games, out_dir, progress_every=1000):
     for w in writers.values():
         w.flush()
     elapsed = time.time() - t0
+    meta = dict(meta, habit_games=habit_games if v2 else None)
     return n_rows, elapsed, meta
 
 
@@ -545,6 +645,12 @@ def write_manifest(path, n_games, n_rows, elapsed, meta, smoke):
         f.write(f"# master_seed={meta['master_seed']} "
                 f"n_train_personalities={meta['n_train_personalities']} "
                 f"n_heldout_personalities={meta['n_heldout_personalities']}\n")
+        f.write(f"# population_v={meta.get('population_v', 1)}\n")
+        f.write(f"# habit_rule: {meta.get('habit_rule', 'n/a')}\n")
+        if meta.get("habit_games"):
+            f.write("# games per habit setting: "
+                    + " ".join(f"{h}={n}" for h, n in
+                               meta["habit_games"].items()) + "\n")
         f.write(f"# table_rule: {meta['table_rule']}\n")
         f.write(f"# row_unit: {meta['row_unit']}\n")
         f.write(f"# epsilon_convention: {meta['epsilon_convention']}\n")
@@ -562,12 +668,13 @@ def write_manifest(path, n_games, n_rows, elapsed, meta, smoke):
                 f"{n_rows / elapsed:.1f} games_per_sec={n_games / elapsed:.2f}\n")
 
 
-def _load_and_verify_smoke(out_dir):
+def _load_and_verify_smoke(out_dir, v2=False):
     """Load every shard back; verify schema, legality, and the held-out wall."""
     paths = sorted(p for p in os.listdir(out_dir) if p.startswith("pop_"))
     assert paths, "no shards written"
     seen_pids = set()
     seat_seen = set()
+    habit_rows = {h: 0 for h in HABIT_ORDER}
     n_rows = 0
     for name in paths:
         d = np.load(os.path.join(out_dir, name), allow_pickle=True)
@@ -593,21 +700,48 @@ def _load_and_verify_smoke(out_dir):
             assert (int(lm[row]) >> int(cc[row])) & 1, (
                 f"{name} row {row}: chosen card {cc[row]} not in legal mask "
                 f"{lm[row]:052b}")
+        if v2:
+            hb = d["habit"]
+            assert hb.dtype == np.int8 and hb.shape[0] == cc.shape[0]
+            # the recorded epsilon must lie inside the recorded setting's
+            # band: the proof that the habit column and the transformed
+            # dials describe the same player.
+            for k, h in enumerate(HABIT_ORDER):
+                m = hb == k
+                habit_rows[h] += int(m.sum())
+                if m.any():
+                    lo, hi = HABIT_SETTINGS[h]["epsilon"]
+                    assert np.all((eps[m] >= lo - 1e-9)
+                                  & (eps[m] <= hi + 1e-9)), (
+                        f"{name}: epsilon outside {h}'s band {lo}..{hi}")
+        else:
+            assert "habit" not in d.files, (
+                "a v1 shard carries a habit column -- schema drift")
         n_rows += cc.shape[0]
         seen_pids.update(int(x) for x in pid.reshape(-1))
         seat_seen.update(int(x) for x in seat)
     # the held-out wall: no held-out id anywhere in any shard.
-    leaked = seen_pids & HELDOUT_SET
+    held = V2_HELDOUT_SET if v2 else HELDOUT_SET
+    leaked = seen_pids & held
     assert not leaked, f"held-out ids leaked into shards: {leaked}"
     assert seat_seen == {0, 1, 2, 3}, (
         f"not all 4 seats produced decision events: {seat_seen}")
     anchors_present = seen_pids & set(ANCHOR_IDS.values())
-    assert anchors_present, "no anchor id appeared in any shard"
+    if v2:
+        assert not anchors_present, (
+            f"anchors are not part of the v2 population: {anchors_present}")
+        assert all(n > 0 for n in habit_rows.values()), (
+            f"a habit setting produced no rows: {habit_rows}")
+    else:
+        assert anchors_present, "no anchor id appeared in any shard"
     print(f"smoke verify: {len(paths)} shards, {n_rows} rows; chosen card "
           f"always in legal mask; PROFILER_FEATURES_V=1 hand-zeroing intact; "
-          f"held-out wall holds (0 of {len(HELDOUT_SET)} held-out ids seen); "
-          f"all 4 seats present; anchors present ({sorted(anchors_present)}); "
-          f"{len(seen_pids)} distinct personality/anchor ids seen")
+          f"held-out wall holds (0 of {len(held)} held-out ids seen); "
+          f"all 4 seats present; "
+          + (f"habit rows {habit_rows} (epsilon inside each band); "
+             f"no anchors (v2); " if v2 else
+             f"anchors present ({sorted(anchors_present)}); ")
+          + f"{len(seen_pids)} distinct personality/anchor ids seen")
     return n_rows
 
 
@@ -619,20 +753,29 @@ def main():
     ap.add_argument("--smoke", action="store_true",
                     help=f"{SMOKE_GAMES} games, separate output dir, full "
                          f"schema + determinism + hidden-hand verification")
+    ap.add_argument("--v2", action="store_true",
+                    help="Phase 6 Task A2: the v2 population across a 25%% "
+                         "mix of habit settings H0-H3 (see module docstring)")
     args = ap.parse_args()
 
-    base_name = os.path.basename(OUT_DIR)
+    root = OUT_DIR_V2 if args.v2 else OUT_DIR
+    seed_base = V2_SEED_BASE if args.v2 else SEED_BASE
+    base_name = os.path.basename(root)
     if args.smoke:
         n_games = SMOKE_GAMES
-        out_dir = os.path.join(OUT_DIR, "smoke")
+        out_dir = os.path.join(root, "smoke")
     else:
         n_games = args.games
-        out_dir = OUT_DIR
+        out_dir = root
 
-    print(f"generating {n_games} games (seeds {SEED_BASE}..."
-          f"{SEED_BASE + n_games - 1}) -> {out_dir}", flush=True)
+    print(f"generating {n_games} games (seeds {seed_base}..."
+          f"{seed_base + n_games - 1}) -> {out_dir} "
+          f"(population_v={2 if args.v2 else 1})", flush=True)
     n_rows, elapsed, meta = generate(
-        n_games, out_dir, progress_every=20 if args.smoke else 1000)
+        n_games, out_dir, progress_every=20 if args.smoke else 1000,
+        v2=args.v2,
+        shard_rows=SMOKE_SHARD_ROWS if (args.smoke and args.v2)
+        else SHARD_ROWS)
     manifest_path = os.path.join(
         out_dir if args.smoke else RESULTS_DIR,
         "manifest_smoke.txt" if args.smoke else
@@ -645,12 +788,14 @@ def main():
           f"{n_rows / n_games:.2f} decisions/game)")
 
     if args.smoke:
-        n_smoke_rows = _load_and_verify_smoke(out_dir)
+        n_smoke_rows = _load_and_verify_smoke(out_dir, v2=args.v2)
 
         # determinism: rerun a handful of seeds, expect byte-identical rows.
-        for seed in [SEED_BASE, SEED_BASE + 1, SEED_BASE + 5]:
-            r1, t1 = play_and_record(seed)
-            r2, t2 = play_and_record(seed)
+        pool = V2_POOL if args.v2 else None
+        for seed in [seed_base, seed_base + 1, seed_base + 5]:
+            hb = habit_for_seed(seed) if args.v2 else None
+            r1, t1 = play_and_record(seed, pool=pool, habit=hb)
+            r2, t2 = play_and_record(seed, pool=pool, habit=hb)
             assert t1 == t2, f"seed {seed}: table not deterministic"
             for k in ("legal_mask", "chosen_card", "acting_seat", "epsilon",
                       "ply"):
@@ -663,7 +808,8 @@ def main():
               f"across two independent runs")
 
         verify_hidden_hand_independence(
-            range(SEED_BASE, SEED_BASE + 20))
+            range(seed_base, seed_base + 20), pool=pool,
+            habit_fn=habit_for_seed if args.v2 else None)
 
         decisions_per_game = n_smoke_rows / n_games
         target_rows = 5_000_000

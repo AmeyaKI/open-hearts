@@ -51,18 +51,23 @@ HIDDEN2 = 128
 NEG_INF = float("-inf")
 
 
-def input_dim(conditioned):
-    return NF + PARAM_DIM if conditioned else NF
+def input_dim(conditioned, param_dim=PARAM_DIM):
+    """`param_dim` is additive (Phase 6 Task A2): the v2 CONDITIONED variant
+    appends `PARAM_DIM_V2 = 23` slots instead of v1's 20.  The default keeps
+    every existing caller -- and `models/profiler_v1.npz`'s 353-wide input --
+    byte-unchanged."""
+    return NF + int(param_dim) if conditioned else NF
 
 
 class ProfilerMLP(nn.Module):
     """n_in -> h1 -> h2 -> 52 logits (masking happens in the loss / kernel)."""
 
-    def __init__(self, conditioned=False, hidden1=HIDDEN1, hidden2=HIDDEN2):
+    def __init__(self, conditioned=False, hidden1=HIDDEN1, hidden2=HIDDEN2,
+                 param_dim=PARAM_DIM):
         super().__init__()
-        n_in = input_dim(conditioned)
+        n_in = input_dim(conditioned, param_dim)
         self.conditioned = bool(conditioned)
-        self.n_param_in = PARAM_DIM if conditioned else 0
+        self.n_param_in = int(param_dim) if conditioned else 0
         self.fc1 = nn.Linear(n_in, hidden1)
         self.fc2 = nn.Linear(hidden1, hidden2)
         self.fc3 = nn.Linear(hidden2, N_CARDS)
@@ -74,10 +79,11 @@ class ProfilerMLP(nn.Module):
         return self.fc3(x)
 
 
-def make_model(seed=0, conditioned=False, hidden1=HIDDEN1, hidden2=HIDDEN2):
+def make_model(seed=0, conditioned=False, hidden1=HIDDEN1, hidden2=HIDDEN2,
+               param_dim=PARAM_DIM):
     """Deterministic init: same (seed, shape) -> same initial weights."""
     torch.manual_seed(seed)
-    return ProfilerMLP(conditioned, hidden1, hidden2).float()
+    return ProfilerMLP(conditioned, hidden1, hidden2, param_dim).float()
 
 
 def weights_dict(model):
