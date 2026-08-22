@@ -1,11 +1,39 @@
 # open-hearts
 
-A small project that plays the card game Hearts and tries to do two things honestly:
+**A decision engine for the card game Hearts, built to answer one question with evidence: does explicitly reasoning about where the hidden cards are actually make a bot play better?**
 
-1. **Guess where the hidden cards are**, using only what a player would legitimately know (their own hand, and what's been played).
-2. **Use those guesses to pick better moves**, by imagining a few likely arrangements of the hidden cards, playing each one out, and picking the move that scores best on average.
+Hearts is an imperfect-information game — you never see the other players' hands. This engine maintains an explicit probability distribution over every hidden card's location, updates it from hard deductive evidence (a player who fails to follow suit is *provably* void in that suit), and feeds those beliefs into a search that samples concrete possible hands and plays them out.
 
-The whole point of this project is measuring whether step 2 actually works, and reporting the answer plainly even where it's underwhelming.
+Every number below is measured on matched deals with confidence intervals. The experiments that came out negative are published next to the ones that didn't.
+
+**Status:** Phases 1–5 complete; Phase 6 (external benchmarking, opponent-predictability curve) in progress. ~17k lines across engine, inference, search, and evaluation; 289 tests. House rules: no passing round, no shoot-the-moon.
+
+## Results at a glance
+
+Hearts deals 26 points per hand among 4 players, so **6.5 points/hand is symmetric break-even — lower is better.**
+
+| Matchup | Points/hand | Scale |
+|---|---|---|
+| **vs. OpenSpiel's ISMCTS bot** — first third-party benchmark | **4.70** (theirs: 7.10) | 1,000 matched deals |
+| vs. 3 heuristic opponents — constraint beliefs + honest search | **3.25** [3.07, 3.45] | 500 deals × 4 rotations |
+| vs. 3 heuristic opponents — + opponent choice-reading | **2.87** [2.70, 3.04] | 500 deals × 4 rotations |
+| vs. 3 held-out synthetic personalities | **2.35** [2.17, 2.52] | 500 deals × 4 rotations |
+| *control:* heuristic vs. three copies of itself | 6.50 | break-even alarm |
+| *floor:* random legal play | 11.55 | — |
+
+**Hidden-card inference.** Top-1 accuracy at locating an opponent's card by the last trick, over 2,000 games: **33%** with no information → **48%** from voids alone → **60%** with full constraint propagation → **90%** when opponents' *choices* are also read. That last figure holds only against a known policy and collapses against unfamiliar opponents — quantified in Phase 3 and Phase 5 below, not hidden.
+
+**Engineering.** 34× end-to-end speedup (23.9s → 0.70s per search game) from 52-bit bitboards and numba-compiled kernels, gated against retained pure-Python reference implementations. ~0.146s per decision — comparable to the ISMCTS baseline's cost.
+
+## Design decisions that shaped the results
+
+- **The information boundary is architectural, not conventional.** Player code can only ever receive a `PlayerView` — own hand, play history, legal moves. `GameState` has exactly one filtering constructor, so a bot *cannot* see hidden hands even by accident. The classic silent bug of imperfect-information agents is structurally excluded rather than tested for.
+- **Every optimization keeps its reference implementation.** Pure-Python versions of every compiled kernel are retained and still tested; `OPENHEARTS_NO_JIT=1` runs them everywhere. Deterministic paths are gated on bitwise-identical output, so speed was never silently traded against correctness.
+- **Comparisons are paired on deals and bootstrapped over deals.** Every configuration sees identical cards; each deal is played 4× with the bot rotated through all four seats; confidence intervals resample *deals*, not games, because a deal's four rotations share its luck.
+- **Expectations are pre-registered before runs and reported verbatim** — including failures. This caught the project's own wrong baseline in Phase 5, and three separate learned-model approaches were killed and published rather than buried.
+- **A break-even alarm runs inside the test suite.** Four identical heuristic players must average 6.5 points/hand; if the evaluation harness ever breaks, that assertion fires before any result is trusted.
+
+Charts referenced throughout are committed in `docs/`. Raw result files land in `results/`, which is gitignored — regenerate them with the commands under [How to run](#how-to-run).
 
 ## The one-idea summary
 
