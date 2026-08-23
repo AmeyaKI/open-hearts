@@ -1001,11 +1001,11 @@ def _inner_best(obs_hand, legal, opp_seats, inner_hands, n_ok, observer,
 
 
 @njit(cache=True)
-def honest_decision_kernel(obs_hand, opp_seats, real_cards, real_seats,
-                           n_real, trick_cards0, trick_seats0, trick_len0,
-                           hearts_broken0, trick_number0, scores0, observer,
-                           arrangements, legal_cards, n_inner, level,
-                           respects_voids, max_restarts, seeds):
+def _honest_core(obs_hand, opp_seats, real_cards, real_seats,
+                 n_real, trick_cards0, trick_seats0, trick_len0,
+                 hearts_broken0, trick_number0, scores0, observer,
+                 arrangements, n_worlds, legal_cards, n_cand, n_inner, level,
+                 respects_voids, max_restarts, seeds, seed_off, avgs):
     """Steps 3-4 of `HonestSearchPlayer.choose`, entirely in one crossing.
 
     For each candidate x outer world: rebuild the imagined state, play the
@@ -1030,11 +1030,19 @@ def honest_decision_kernel(obs_hand, opp_seats, real_cards, real_seats,
     bound: each (candidate, world) playout intercepts at most once); running
     out is a loud `_ST_SEEDS`, never a silent reseed.
 
-    Returns `(best_card, n_fallbacks, n_failed, n_seeds_used, avgs, status)`,
-    where `avgs[ci]` is candidate `ci`'s mean points-from-here.
+    Returns `(best_card, n_fallbacks, n_failed, n_seeds_used, status)` and
+    writes `avgs[ci]` = candidate `ci`'s mean points-from-here.
+
+    Phase 6C split this body out of `honest_decision_kernel` (now a thin
+    wrapper below) so the batched exploiter kernel can run a whole NESTED
+    champion decision in-kernel. The extra parameters are all about being
+    callable from inside another kernel: `n_worlds`/`n_cand` because the
+    caller passes reused scratch buffers whose shape is an upper bound rather
+    than the live count; `seed_off` because the caller owns one long
+    pre-drawn seed array that many nested decisions consume in order (the
+    returned count is RELATIVE to `seed_off`); and `avgs` because a numba
+    callee should not allocate a return array per call.
     """
-    n_worlds = arrangements.shape[0]
-    n_cand = legal_cards.shape[0]
     base_score = scores0[observer]
 
     # outer scratch
@@ -1068,12 +1076,11 @@ def honest_decision_kernel(obs_hand, opp_seats, real_cards, real_seats,
 
     n_fallbacks = 0
     n_failed = 0
-    n_seeds = 0
+    n_seeds = seed_off
     best_card = -1
     best_avg = 0.0
     first = True
     stop_seat = observer if n_inner > 0 else -1
-    avgs = np.zeros(n_cand, dtype=np.float64)
 
     for ci in range(n_cand):
         card = legal_cards[ci]
@@ -1121,16 +1128,16 @@ def honest_decision_kernel(obs_hand, opp_seats, real_cards, real_seats,
                     # unfused path's inner `choose` would draw NOTHING at a
                     # forced move. A divergence here would silently shift the
                     # seed count, so it is loud instead.
-                    return (-1, n_fallbacks, n_failed, n_seeds, avgs,
+                    return (-1, n_fallbacks, n_failed, n_seeds - seed_off,
                             _ST_BAD_STOP)
                 n_unseen, ev = _evidence(
                     obs_now, plays_cards, plays_seats, n_plays, observer,
                     level, respects_voids, probs, hand_sizes, void_masks,
                     unseen_cards, sizes)
                 if ev != _ST_OK:
-                    return -1, n_fallbacks, n_failed, n_seeds, avgs, ev
+                    return -1, n_fallbacks, n_failed, n_seeds - seed_off, ev
                 if n_seeds >= seeds.shape[0]:
-                    return (-1, n_fallbacks, n_failed, n_seeds, avgs,
+                    return (-1, n_fallbacks, n_failed, n_seeds - seed_off,
                             _ST_SEEDS)
                 # Exactly where `sample_arrangements_batch` seeds on the
                 # unfused path: one pre-drawn seed per inner decision.
@@ -1166,7 +1173,29 @@ def honest_decision_kernel(obs_hand, opp_seats, real_cards, real_seats,
             best_card = card
             best_avg = avg
             first = False
-    return best_card, n_fallbacks, n_failed, n_seeds, avgs, _ST_OK
+    return (best_card, n_fallbacks, n_failed, n_seeds - seed_off,
+            _ST_OK)
+
+
+@njit(cache=True)
+def honest_decision_kernel(obs_hand, opp_seats, real_cards, real_seats,
+                           n_real, trick_cards0, trick_seats0, trick_len0,
+                           hearts_broken0, trick_number0, scores0, observer,
+                           arrangements, legal_cards, n_inner, level,
+                           respects_voids, max_restarts, seeds):
+    """Phase 2.8 entry point. Behaviour unchanged; body moved to `_honest_core`.
+
+    The split changed no line of the loop itself, and the 2.8 bitwise pins run
+    against this entry point, so they verify the split as well.
+    """
+    n_cand = legal_cards.shape[0]
+    avgs = np.zeros(n_cand, dtype=np.float64)
+    best_card, n_fb, n_fs, n_used, status = _honest_core(
+        obs_hand, opp_seats, real_cards, real_seats, n_real, trick_cards0,
+        trick_seats0, trick_len0, hearts_broken0, trick_number0, scores0,
+        observer, arrangements, arrangements.shape[0], legal_cards, n_cand,
+        n_inner, level, respects_voids, max_restarts, seeds, 0, avgs)
+    return best_card, n_fb, n_fs, n_used, avgs, status
 
 
 def _raise_status(status: int) -> None:

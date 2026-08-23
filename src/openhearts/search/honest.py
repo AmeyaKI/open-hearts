@@ -143,9 +143,10 @@ class HonestSearchPlayer:
         # the class map behind it (diagnostics, for the gate tests).
         self.last_candidates = None
         self.last_rep_of = None
-        # Per-candidate mean scores from the most recent FUSED decision
-        # (diagnostic, for the gate tests). The unfused reference loop is left
-        # untouched and does not set it.
+        # Per-candidate mean scores from the most recent decision
+        # (diagnostic, for the gate tests). Set by the fused path, by the
+        # unfused reference loop in `_evaluate`, and by the exploiter's
+        # batched kernel -- so the three can be compared directly.
         self.last_avgs = None
         self.fallbacks = 0         # outer decisions that fell back to heuristic
         self.failed_samples = 0     # outer arrangements the sampler could not build
@@ -247,7 +248,26 @@ class HonestSearchPlayer:
             self.last_avgs = avgs
             return card
 
+        return self._evaluate(view, arrangements, candidates)
+
+    def _evaluate(self, view: PlayerView, arrangements, candidates) -> int:
+        """Steps 3-4, the reference (unfused) loop: score every candidate.
+
+        Split out of `choose` in Phase 6C as the ONE overridable hook for an
+        alternative evaluator -- the exploiter's batched nested-model kernel
+        overrides exactly this method. Everything before it (the belief table,
+        the outer world draw, the fallback guard, the candidate list) stays
+        inherited code that no subclass touches, which is what keeps the
+        exploiter's gate (iii) -- "the model never moves beliefs or the
+        sampler" -- a structural fact rather than a promise.
+
+        The loop itself is unchanged apart from recording `last_avgs`, a bare
+        diagnostic assignment that draws nothing and branches on nothing, so
+        the fused path's per-candidate means now have an unfused counterpart
+        to be compared against.
+        """
         base_score = view.scores[view.seat]
+        avgs = []
         best_card, best_avg = None, None
         for card in candidates:
             total = 0
@@ -257,8 +277,10 @@ class HonestSearchPlayer:
                 self._playout(state, view.seat)
                 total += state.scores[view.seat] - base_score
             avg = total / len(arrangements)
+            avgs.append(avg)
             if best_avg is None or avg < best_avg:
                 best_card, best_avg = card, avg
+        self.last_avgs = np.asarray(avgs, dtype=float)
         return best_card
 
     def _posterior_worlds(self, view: PlayerView):
