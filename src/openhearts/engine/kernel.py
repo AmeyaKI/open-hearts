@@ -1220,7 +1220,7 @@ def honest_evidence(obs_hand, all_plays, observer, level, respects_voids):
 
 def honest_decision(view, arrangements, observer: int, n_inner: int,
                     level: int, respects_voids: bool, rng,
-                    max_restarts: int = 200):
+                    max_restarts: int = 200, candidates=None):
     """Adapter for `honest_decision_kernel`.
 
     `arrangements` is the OUTER worlds (a list of 3 bitmasks each, in
@@ -1236,8 +1236,17 @@ def honest_decision(view, arrangements, observer: int, n_inner: int,
     would leave it in, having produced the same values in the same order, and
     every world/playout/mean/card downstream is bitwise identical.
 
+    `candidates` (optional) replaces the legal-move list with a shorter,
+    still-ASCENDING one -- the equivalence-class representatives from
+    `search/grouping.py`. Ascending order is load-bearing: the kernel's
+    tie-break keeps the lowest card index. `None` keeps the exact 2.8
+    behaviour, so every bitwise pin holds with grouping off. NOTE that with
+    grouping ON the pre-drawn seed count `n_cand * n_worlds` shrinks, so the
+    rng end state legitimately differs from the ungrouped path -- grouping is
+    NOT bitwise-compatible with existing rows.
+
     Returns `(best_card, inner_fallbacks, inner_failed_samples, avgs)`, where
-    `avgs` is one mean score per legal card in ascending card order.
+    `avgs` is one mean score per candidate in ascending card order.
     """
     all_plays = list(view.history) + list(view.current_trick)
     n_real = len(all_plays)
@@ -1254,7 +1263,9 @@ def honest_decision(view, arrangements, observer: int, n_inner: int,
 
     from openhearts.engine import cards as _cards  # local: avoids cycle
 
-    legal_cards = np.array(_cards.cards_in(view.legal_moves), dtype=np.int64)
+    if candidates is None:
+        candidates = _cards.cards_in(view.legal_moves)
+    legal_cards = np.array(candidates, dtype=np.int64)
     arr = np.array([[int(h) for h in w] for w in arrangements],
                    dtype=np.int64).reshape(len(arrangements), 3)
     opp_seats = np.array([(observer + 1 + i) % 4 for i in range(3)],

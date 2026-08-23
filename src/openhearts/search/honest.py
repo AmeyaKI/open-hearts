@@ -59,6 +59,18 @@ It is still DEFAULT OFF until the gates are signed off: every committed row --
 the 2.869 bridge included -- stays reachable with the flag off, and
 `OPENHEARTS_NO_JIT=1` never takes the fused branch at all.
 
+An optional `group_equivalent=True` (ScrofaZero adoption (i), DEFAULT OFF)
+cuts the candidate list to one representative per provably interchangeable
+class -- same suit, nothing live between them in rank, no queen of spades in
+the chain -- and credits the representative's score to the whole class. The
+condition, the isomorphism proof, and the one caveat (which member we play is
+readable at a real table, and grouping deletes the accidental randomness the
+C0 probe measured on exactly these indifferent choices) live in
+`search/grouping.py`. It is a theorem, not an approximation, but it is NOT
+bitwise-compatible with existing rows: fewer candidates means fewer pre-drawn
+inner seeds and a different rng end state, so it must never be mixed inside
+one experiment.
+
 Scope note for a future task: `ValueSearchPlayer` / `ProfiledSearchPlayer`
 are NOT fused here. Their horizon path would hook in at the same place this
 one does -- `_use_fused()` below -- by passing their fused scorer down into
@@ -79,6 +91,7 @@ from openhearts.engine import cards, kernel
 from openhearts.engine.state import GameState, PlayerView
 from openhearts.players.heuristic import HeuristicPlayer
 from openhearts.sampler.sampler import sample_arrangement
+from openhearts.search import grouping
 from openhearts.search.decision import SearchPlayer, state_from_view
 
 
@@ -94,7 +107,8 @@ class HonestSearchPlayer:
                  sampler_respects_voids: bool = True,
                  jit_sampler: bool = True,
                  posterior_factory=None,
-                 fused: bool = False):
+                 fused: bool = False,
+                 group_equivalent: bool = False):
         self.level = level
         self.n_outer = n_outer
         self.n_inner = n_inner
@@ -117,6 +131,18 @@ class HonestSearchPlayer:
         # (n_inner=0) and the Python-sampler config all keep their exact old
         # code path with the flag in either position.
         self.fused = fused
+        # Equivalence-class card grouping (ScrofaZero adoption (i)),
+        # DEFAULT OFF. When on, provably interchangeable legal cards are
+        # evaluated once at the lowest member of their class and the score is
+        # credited to the whole class. The theorem is in search/grouping.py.
+        # It is NOT bitwise-compatible with existing rows: fewer candidates
+        # means fewer pre-drawn inner seeds on the fused path and a different
+        # rng end state (same card, by theorem, when the scores are matched).
+        self.group_equivalent = group_equivalent
+        # The candidate list the most recent decision actually evaluated, and
+        # the class map behind it (diagnostics, for the gate tests).
+        self.last_candidates = None
+        self.last_rep_of = None
         # Per-candidate mean scores from the most recent FUSED decision
         # (diagnostic, for the gate tests). The unfused reference loop is left
         # untouched and does not set it.
@@ -196,13 +222,24 @@ class HonestSearchPlayer:
                 self.fallbacks += 1
                 return self._heuristic.choose(view)
 
+        candidates = legal
+        self.last_rep_of = None
+        if self.group_equivalent:
+            rep_mask, rep_of = grouping.equivalence_classes(
+                view.hand, view.legal_moves,
+                grouping.dead_mask_from_view(view))
+            candidates = cards.cards_in(rep_mask)
+            self.last_rep_of = rep_of
+        self.last_candidates = candidates
+
         if self._use_fused():
             # Steps 3-4 in one crossing. Same worlds in (constraint sampler or
             # posterior alike), same seeds, same tie-break out -- bitwise.
             card, n_fb, n_fs, avgs = kernel.honest_decision(
                 view, arrangements, view.seat, self.n_inner,
                 _LEVEL_CODE[self.level], self.sampler_respects_voids,
-                self.rng)
+                self.rng,
+                candidates=None if not self.group_equivalent else candidates)
             # Keep `inner_fallbacks` / `inner_failed_samples` reporting the
             # same quantities they report on the unfused path.
             self._inner.fallbacks += n_fb
@@ -212,7 +249,7 @@ class HonestSearchPlayer:
 
         base_score = view.scores[view.seat]
         best_card, best_avg = None, None
-        for card in legal:
+        for card in candidates:
             total = 0
             for hands in arrangements:
                 state = state_from_view(view, hands)
