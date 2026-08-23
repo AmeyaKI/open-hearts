@@ -41,6 +41,7 @@ _SUIT_MASKS = np.array([((1 << 13) - 1) << (13 * s) for s in range(4)],
 _HEARTS_MASK = np.int64(((1 << 13) - 1) << 39)
 _POINTS_MASK = np.int64((((1 << 13) - 1) << 39) | (1 << _QS))
 _ONE = np.int64(1)
+_FULL_DECK = np.int64((1 << 52) - 1)
 
 
 # --------------------------------------------------------------------------
@@ -418,29 +419,23 @@ def audit_world_weight(hands, all_plays, observer, epsilon,
 # batch arrangement sampler (Phase 2.6)
 # --------------------------------------------------------------------------
 @njit(cache=True)
-def sample_arrangements_batch(probs, void_suit_masks, hand_sizes,
-                              unseen_cards, n_samples, max_restarts, seed):
-    """Draw `n_samples` arrangements of `unseen_cards` among 3 opponents.
+def _sample_arrangements_core(probs, void_suit_masks, hand_sizes,
+                              unseen_cards, n_samples, max_restarts,
+                              hands_out, attempts_out, remaining, w, hands):
+    """The draw loop, WITHOUT seeding and WITHOUT allocating (Phase 2.8).
 
-    Exact algorithmic port of `sampler.sample_arrangement`, batched: walk the
-    unseen cards in ascending order, pick a holder with probability
-    proportional to `probs[:, c]` after zeroing opponents who are full or void
-    in that suit, restart the whole arrangement on a dead end, give up after
-    `max_restarts`. `void_suit_masks[i]` has bit s set when opponent i is void
-    in suit s (kept separate from `probs` because UNIFORM tables do not encode
-    voids, and one experiment disables void-respecting sampling entirely).
+    Split out of `sample_arrangements_batch` so the fused honest-search kernel
+    can seed numba's generator ONCE per decision and then draw a continuous
+    stream through every inner sample, reusing scratch buffers instead of
+    re-initialising MT19937 and reallocating for each of the (candidate x
+    world) inner re-determinizations. The 2.6 entry point below is unchanged
+    in behaviour -- it seeds, allocates, and calls this -- so every existing
+    bitwise pin on the batch sampler still holds.
 
-    Returns (hands[n_samples, 3], attempts[n_samples], n_success); only the
-    first `n_success` rows are filled. Failures are simply not emitted, which
-    is what the callers' `failed_samples` counter counts.
+    Only the first `n_success` rows of `hands_out` / `attempts_out` are
+    written, so a reused buffer needs no clearing between calls.
     """
-    np.random.seed(seed)
     k = unseen_cards.shape[0]
-    hands_out = np.zeros((n_samples, 3), dtype=np.int64)
-    attempts_out = np.zeros(n_samples, dtype=np.int64)
-    remaining = np.zeros(3, dtype=np.int64)
-    w = np.zeros(3, dtype=np.float64)
-    hands = np.zeros(3, dtype=np.int64)
     n_success = 0
     for _s in range(n_samples):
         ok = False
@@ -489,6 +484,35 @@ def sample_arrangements_batch(probs, void_suit_masks, hand_sizes,
             hands_out[n_success, 2] = hands[2]
             attempts_out[n_success] = used
             n_success += 1
+    return n_success
+
+
+@njit(cache=True)
+def sample_arrangements_batch(probs, void_suit_masks, hand_sizes,
+                              unseen_cards, n_samples, max_restarts, seed):
+    """Draw `n_samples` arrangements of `unseen_cards` among 3 opponents.
+
+    Exact algorithmic port of `sampler.sample_arrangement`, batched: walk the
+    unseen cards in ascending order, pick a holder with probability
+    proportional to `probs[:, c]` after zeroing opponents who are full or void
+    in that suit, restart the whole arrangement on a dead end, give up after
+    `max_restarts`. `void_suit_masks[i]` has bit s set when opponent i is void
+    in suit s (kept separate from `probs` because UNIFORM tables do not encode
+    voids, and one experiment disables void-respecting sampling entirely).
+
+    Returns (hands[n_samples, 3], attempts[n_samples], n_success); only the
+    first `n_success` rows are filled. Failures are simply not emitted, which
+    is what the callers' `failed_samples` counter counts.
+    """
+    np.random.seed(seed)
+    hands_out = np.zeros((n_samples, 3), dtype=np.int64)
+    attempts_out = np.zeros(n_samples, dtype=np.int64)
+    remaining = np.zeros(3, dtype=np.int64)
+    w = np.zeros(3, dtype=np.float64)
+    hands = np.zeros(3, dtype=np.int64)
+    n_success = _sample_arrangements_core(
+        probs, void_suit_masks, hand_sizes, unseen_cards, n_samples,
+        max_restarts, hands_out, attempts_out, remaining, w, hands)
     return hands_out, attempts_out, n_success
 
 
@@ -731,6 +755,534 @@ def rebalance_iters(probs, hand_sizes, unseen_mask, tol=1e-9, coarse_tol=1e-4,
     """Passes the kernel needed to converge (diagnostic; used by tests)."""
     return _rebalance_call(probs, hand_sizes, unseen_mask, tol, coarse_tol,
                            coarse_after, max_iters)[3]
+
+
+# --------------------------------------------------------------------------
+# fused honest-search decision loop (Phase 2.8)
+# --------------------------------------------------------------------------
+# Level codes, matching `belief.table.Level`. Passed as an int so the kernel
+# never sees a Python enum.
+LEVEL_UNIFORM = 0
+LEVEL_VOIDS = 1
+LEVEL_FULL = 2
+
+# Evidence / decision status codes. 0 is success; everything else is turned
+# into the SAME AssertionError the Python path raises, never swallowed.
+_ST_OK = 0
+_ST_NO_HOLDER = 1        # table._build_raw's "card has no possible holder"
+_ST_COL_COLLAPSE = 2     # _rebalance status 1
+_ST_NO_CONVERGE = 3      # _rebalance status 2
+_ST_BOUNDS = 4           # _rebalance status 3
+_ST_BAD_STOP = 5         # stopped at a seat with <=1 legal move (impossible)
+_ST_SEEDS = 6            # ran out of pre-drawn seeds (upper bound was wrong)
+
+
+@njit(cache=True)
+def _evidence(obs_hand, plays_cards, plays_seats, n_plays, observer, level,
+              respects_voids, probs, hand_sizes, void_masks, unseen_cards,
+              sizes):
+    """Port of `belief.table._build_raw` + `from_view`'s normalisation.
+
+    Reads NOTHING but the observer's own hand and the flat play sequence --
+    i.e. exactly the contents of a `PlayerView`. The fused loop holds a
+    fully-resolved imagined world in `hands[]`, and this function is
+    deliberately not given it: the view boundary is enforced by the argument
+    list. `tests/test_jit_honest_evidence.py` pins the result bitwise against
+    `BeliefTable.from_view` over imagined mid-playout states.
+
+    Trick grouping: `plays_cards/plays_seats[0:n_plays]` is the whole hand's
+    play sequence in order, so consecutive runs of 4 are exactly the tricks --
+    which is what makes this equivalent to the reference's
+    `history + current_trick` scan (history only ever extends by whole
+    tricks; the test asserts that rather than assuming it).
+
+    Writes `probs` (3x52), `hand_sizes` (3), `void_masks` (3) and
+    `unseen_cards` (52, ascending); `sizes` is float64 scratch for the
+    rebalance. Returns `(n_unseen, status)`.
+    """
+    # ---- seen / unseen ---------------------------------------------------
+    seen = obs_hand
+    for k in range(n_plays):
+        seen |= _ONE << plays_cards[k]
+    unseen_mask = _FULL_DECK & ~seen
+
+    # ---- hand sizes ------------------------------------------------------
+    played_count0 = 0
+    played_count1 = 0
+    played_count2 = 0
+    played_count3 = 0
+    for k in range(n_plays):
+        s = plays_seats[k]
+        if s == 0:
+            played_count0 += 1
+        elif s == 1:
+            played_count1 += 1
+        elif s == 2:
+            played_count2 += 1
+        else:
+            played_count3 += 1
+    for i in range(3):
+        s = (observer + 1 + i) % 4
+        if s == 0:
+            hand_sizes[i] = 13 - played_count0
+        elif s == 1:
+            hand_sizes[i] = 13 - played_count1
+        elif s == 2:
+            hand_sizes[i] = 13 - played_count2
+        else:
+            hand_sizes[i] = 13 - played_count3
+
+    # ---- voids: failure to follow the LED suit ---------------------------
+    # The observer's own failures are skipped (`if s in opponent_seats` in the
+    # reference); seat -> opponent index is (s - observer - 1) mod 4, written
+    # as (s - observer + 3) % 4 so it never goes negative.
+    for i in range(3):
+        void_masks[i] = 0
+    tl = 0
+    led = -1
+    for k in range(n_plays):
+        c = plays_cards[k]
+        s = plays_seats[k]
+        if tl > 0:
+            if c // 13 != led:
+                idx = (s - observer + 3) % 4
+                if idx < 3:
+                    void_masks[idx] |= _ONE << led
+        else:
+            led = c // 13
+        tl += 1
+        if tl == 4:
+            tl = 0
+
+    # ---- raw probs -------------------------------------------------------
+    for i in range(3):
+        for c in range(52):
+            probs[i, c] = 0.0
+    n_unseen = 0
+    for c in range(52):
+        if (unseen_mask >> c) & 1:
+            unseen_cards[n_unseen] = c
+            n_unseen += 1
+            probs[0, c] = 1.0
+            probs[1, c] = 1.0
+            probs[2, c] = 1.0
+
+    if level == LEVEL_VOIDS or level == LEVEL_FULL:
+        for i in range(3):
+            for s in range(4):
+                if (void_masks[i] >> s) & 1:
+                    for c in range(13 * s, 13 * s + 13):
+                        probs[i, c] = 0.0
+
+    # guard: every unseen card must have at least one possible holder
+    for j in range(n_unseen):
+        c = unseen_cards[j]
+        if probs[0, c] + probs[1, c] + probs[2, c] <= 0.0:
+            return n_unseen, _ST_NO_HOLDER
+
+    # ---- level-specific normalisation ------------------------------------
+    if level == LEVEL_FULL:
+        if n_unseen > 0:  # reference `_rebalance` returns early when empty
+            for i in range(3):
+                sizes[i] = hand_sizes[i]
+            _p, status, _dev, _n = _rebalance_kernel(
+                probs, sizes, unseen_cards[:n_unseen],
+                1e-9, 1e-4, 2000, 100000)
+            if status == 1:
+                return n_unseen, _ST_COL_COLLAPSE
+            if status == 2:
+                return n_unseen, _ST_NO_CONVERGE
+            if status == 3:
+                return n_unseen, _ST_BOUNDS
+    else:
+        # reference: probs /= np.where(col > 0, col, 1.0) over ALL columns
+        for c in range(52):
+            col = probs[0, c] + probs[1, c] + probs[2, c]
+            if col > 0.0:
+                probs[0, c] = probs[0, c] / col
+                probs[1, c] = probs[1, c] / col
+                probs[2, c] = probs[2, c] / col
+
+    # The sampler's void masks are a SEPARATE axis from the probs zeroing:
+    # `sampler_respects_voids=False` empties the void sets only (that is what
+    # HonestSearchPlayer.choose does to the table), leaving the probs of a
+    # VOIDS/FULL table zeroed as built.
+    if not respects_voids:
+        for i in range(3):
+            void_masks[i] = 0
+    return n_unseen, _ST_OK
+
+
+@njit(cache=True)
+def _play_into(hands, scores, tc, ts, tl, hb, tn, seat, card, played,
+               plays_cards, plays_seats, n_plays):
+    """One ply, mutating the array-form state; port of `GameState.play`.
+
+    Also appends to the flat play sequence, which is what `_evidence` reads.
+    Returns `(to_play, played, tl, hb, tn, n_plays)`.
+    """
+    bit = _ONE << card
+    hands[seat] = hands[seat] & ~bit
+    played |= bit
+    if card // 13 == 3:
+        hb = True
+    tc[tl] = card
+    ts[tl] = seat
+    tl += 1
+    plays_cards[n_plays] = card
+    plays_seats[n_plays] = seat
+    n_plays += 1
+    if tl == 4:
+        _l, _r, win_seat = _trick_head(tc, ts, 4)
+        pts = 0
+        for i in range(4):
+            c = tc[i]
+            if c // 13 == 3:
+                pts += 1
+            elif c == _QS:
+                pts += 13
+        scores[win_seat] += pts
+        tl = 0
+        tn += 1
+        to_play = win_seat
+    else:
+        to_play = (seat + 1) % 4
+    return to_play, played, tl, hb, tn, n_plays
+
+
+@njit(cache=True)
+def _inner_best(obs_hand, legal, opp_seats, inner_hands, n_ok, observer,
+                played, tc, ts, tl, hb, tn, scores,
+                ihands, iscores, itc, its, iout_cards, iout_seats):
+    """Phase-1 `SearchPlayer.choose`'s evaluation loop, in-kernel.
+
+    Legal cards are walked in ASCENDING order and the comparison is strict
+    `<`, so ties keep the lowest card index -- identical to the Python loop.
+    The per-world total is accumulated as an int64 and divided once, matching
+    `total / len(arrangements)` exactly, so no float drift enters the
+    comparison.
+    """
+    base = scores[observer]
+    best_card = -1
+    best_avg = 0.0
+    first = True
+    m = legal
+    while m:
+        low = m & -m
+        card = _lowest(low)
+        m ^= low
+        total = 0
+        for j in range(n_ok):
+            ihands[observer] = obs_hand
+            for i in range(3):
+                ihands[opp_seats[i]] = inner_hands[j, i]
+            for s in range(4):
+                iscores[s] = scores[s]
+            for i in range(4):
+                itc[i] = tc[i]
+                its[i] = ts[i]
+            p = played
+            ltl = tl
+            lhb = hb
+            ltn = tn
+            (tp, p, ltl, lhb, ltn, _np) = _play_into(
+                ihands, iscores, itc, its, ltl, lhb, ltn, observer, card, p,
+                iout_cards, iout_seats, 0)
+            (_st, tp, p, ltl, lhb, ltn, _n) = _run(
+                ihands, tp, p, itc, its, ltl, lhb, ltn, iscores, -1,
+                iout_cards, iout_seats)
+            total += iscores[observer] - base
+        avg = total / n_ok
+        if first or avg < best_avg:
+            best_card = card
+            best_avg = avg
+            first = False
+    return best_card
+
+
+@njit(cache=True)
+def honest_decision_kernel(obs_hand, opp_seats, real_cards, real_seats,
+                           n_real, trick_cards0, trick_seats0, trick_len0,
+                           hearts_broken0, trick_number0, scores0, observer,
+                           arrangements, legal_cards, n_inner, level,
+                           respects_voids, max_restarts, seeds):
+    """Steps 3-4 of `HonestSearchPlayer.choose`, entirely in one crossing.
+
+    For each candidate x outer world: rebuild the imagined state, play the
+    candidate, run the heuristic playout to our next real decision,
+    re-determinize THERE (evidence extraction -> 2.7 rebalance -> 2.6 batch
+    sampler -> 2.5 playouts for the inner candidates), play the inner choice,
+    finish the hand; average the points delta; take the min with ties going to
+    the lowest card index -- the same order and the same tie-break as the
+    Python loop.
+
+    RNG -- PRE-DRAWN SEEDS (the Phase 2.8 redesign). `seeds` holds numbers the
+    CALLER already drew from its numpy Generator with the same scalar
+    `rng.integers(2**63)` call the unfused path uses. This kernel consumes
+    them strictly in order, one immediately before each inner sample, calling
+    `np.random.seed` exactly where `sample_arrangements_batch` calls it on the
+    unfused path. Therefore the fused path is BITWISE identical to the unfused
+    JIT path -- same worlds, same playouts, same means, same card -- and the
+    number actually consumed is returned so the caller can leave its Generator
+    in the identical state.
+
+    `seeds` must hold at least `n_cand * n_worlds` entries (the exact upper
+    bound: each (candidate, world) playout intercepts at most once); running
+    out is a loud `_ST_SEEDS`, never a silent reseed.
+
+    Returns `(best_card, n_fallbacks, n_failed, n_seeds_used, avgs, status)`,
+    where `avgs[ci]` is candidate `ci`'s mean points-from-here.
+    """
+    n_worlds = arrangements.shape[0]
+    n_cand = legal_cards.shape[0]
+    base_score = scores0[observer]
+
+    # outer scratch
+    hands = np.zeros(4, dtype=np.int64)
+    scores = np.zeros(4, dtype=np.int64)
+    tc = np.zeros(4, dtype=np.int64)
+    ts = np.zeros(4, dtype=np.int64)
+    plays_cards = np.zeros(52, dtype=np.int64)
+    plays_seats = np.zeros(52, dtype=np.int64)
+    out_cards = np.zeros(52, dtype=np.int64)
+    out_seats = np.zeros(52, dtype=np.int64)
+    # evidence scratch
+    probs = np.zeros((3, 52), dtype=np.float64)
+    hand_sizes = np.zeros(3, dtype=np.int64)
+    void_masks = np.zeros(3, dtype=np.int64)
+    unseen_cards = np.zeros(52, dtype=np.int64)
+    sizes = np.zeros(3, dtype=np.float64)
+    # inner sampler scratch
+    inner_hands = np.zeros((n_inner, 3), dtype=np.int64)
+    inner_att = np.zeros(n_inner, dtype=np.int64)
+    remaining = np.zeros(3, dtype=np.int64)
+    wbuf = np.zeros(3, dtype=np.float64)
+    hbuf = np.zeros(3, dtype=np.int64)
+    # inner playout scratch
+    ihands = np.zeros(4, dtype=np.int64)
+    iscores = np.zeros(4, dtype=np.int64)
+    itc = np.zeros(4, dtype=np.int64)
+    its = np.zeros(4, dtype=np.int64)
+    iout_cards = np.zeros(52, dtype=np.int64)
+    iout_seats = np.zeros(52, dtype=np.int64)
+
+    n_fallbacks = 0
+    n_failed = 0
+    n_seeds = 0
+    best_card = -1
+    best_avg = 0.0
+    first = True
+    stop_seat = observer if n_inner > 0 else -1
+    avgs = np.zeros(n_cand, dtype=np.float64)
+
+    for ci in range(n_cand):
+        card = legal_cards[ci]
+        total = 0
+        for j in range(n_worlds):
+            # ---- rebuild the imagined state (port of state_from_view) ----
+            hands[observer] = obs_hand
+            for i in range(3):
+                hands[opp_seats[i]] = arrangements[j, i]
+            for s in range(4):
+                scores[s] = scores0[s]
+            played = np.int64(0)
+            for k in range(n_real):
+                plays_cards[k] = real_cards[k]
+                plays_seats[k] = real_seats[k]
+                played |= _ONE << real_cards[k]
+            n_plays = n_real
+            for i in range(4):
+                tc[i] = trick_cards0[i]
+                ts[i] = trick_seats0[i]
+            tl = trick_len0
+            hb = hearts_broken0
+            tn = trick_number0
+
+            # ---- our candidate -------------------------------------------
+            (to_play, played, tl, hb, tn, n_plays) = _play_into(
+                hands, scores, tc, ts, tl, hb, tn, observer, card, played,
+                plays_cards, plays_seats, n_plays)
+
+            # ---- forward to our next real decision ------------------------
+            (status, to_play, played, tl, hb, tn, n) = _run(
+                hands, to_play, played, tc, ts, tl, hb, tn, scores,
+                stop_seat, out_cards, out_seats)
+            for k in range(n):
+                plays_cards[n_plays + k] = out_cards[k]
+                plays_seats[n_plays + k] = out_seats[k]
+            n_plays += n
+
+            if status == 1:
+                # ---- re-determinize HERE, from the imagined VIEW ----------
+                obs_now = hands[observer]
+                led0, _wr0, _ws0 = _trick_head(tc, ts, tl)
+                if _popcount(_legal(obs_now, led0, tl, hb, tn)) <= 1:
+                    # `_run` promises to stop only at >1 legal move, and the
+                    # unfused path's inner `choose` would draw NOTHING at a
+                    # forced move. A divergence here would silently shift the
+                    # seed count, so it is loud instead.
+                    return (-1, n_fallbacks, n_failed, n_seeds, avgs,
+                            _ST_BAD_STOP)
+                n_unseen, ev = _evidence(
+                    obs_now, plays_cards, plays_seats, n_plays, observer,
+                    level, respects_voids, probs, hand_sizes, void_masks,
+                    unseen_cards, sizes)
+                if ev != _ST_OK:
+                    return -1, n_fallbacks, n_failed, n_seeds, avgs, ev
+                if n_seeds >= seeds.shape[0]:
+                    return (-1, n_fallbacks, n_failed, n_seeds, avgs,
+                            _ST_SEEDS)
+                # Exactly where `sample_arrangements_batch` seeds on the
+                # unfused path: one pre-drawn seed per inner decision.
+                np.random.seed(seeds[n_seeds])
+                n_seeds += 1
+                n_ok = _sample_arrangements_core(
+                    probs, void_masks, hand_sizes, unseen_cards[:n_unseen],
+                    n_inner, max_restarts, inner_hands, inner_att, remaining,
+                    wbuf, hbuf)
+                n_failed += n_inner - n_ok
+                led, win_rank, _ws = _trick_head(tc, ts, tl)
+                legal = _legal(obs_now, led, tl, hb, tn)
+                if n_ok * 2 < n_inner:
+                    n_fallbacks += 1
+                    chosen = _choose(obs_now, legal, led, win_rank, tl,
+                                     played | obs_now)
+                else:
+                    chosen = _inner_best(
+                        obs_now, legal, opp_seats, inner_hands, n_ok,
+                        observer, played, tc, ts, tl, hb, tn, scores,
+                        ihands, iscores, itc, its, iout_cards, iout_seats)
+                (to_play, played, tl, hb, tn, n_plays) = _play_into(
+                    hands, scores, tc, ts, tl, hb, tn, observer, chosen,
+                    played, plays_cards, plays_seats, n_plays)
+                # ---- finish the hand --------------------------------------
+                (_st, to_play, played, tl, hb, tn, n2) = _run(
+                    hands, to_play, played, tc, ts, tl, hb, tn, scores, -1,
+                    out_cards, out_seats)
+            total += scores[observer] - base_score
+        avg = total / n_worlds
+        avgs[ci] = avg
+        if first or avg < best_avg:
+            best_card = card
+            best_avg = avg
+            first = False
+    return best_card, n_fallbacks, n_failed, n_seeds, avgs, _ST_OK
+
+
+def _raise_status(status: int) -> None:
+    """Turn a kernel status code into the Python path's own exception."""
+    if status == _ST_NO_HOLDER:
+        raise AssertionError("card has no possible holder (bad zeroing)")
+    if status == _ST_COL_COLLAPSE:
+        raise AssertionError("column collapsed to zero during rebalance")
+    if status == _ST_NO_CONVERGE:
+        raise AssertionError("rebalance did not converge")
+    if status == _ST_BOUNDS:
+        raise AssertionError()
+    if status == _ST_BAD_STOP:
+        raise AssertionError(
+            "fused decision stopped at a forced move: the kernel's `_legal` "
+            "and the engine's `legal_moves` disagree")
+    if status == _ST_SEEDS:
+        raise AssertionError(
+            "fused decision ran out of pre-drawn seeds: the n_cand x n_worlds "
+            "upper bound is wrong")
+
+
+def honest_evidence(obs_hand, all_plays, observer, level, respects_voids):
+    """Test/debug adapter for the in-kernel evidence extraction.
+
+    Returns `(probs, voids, hand_sizes, unseen_mask)` in exactly the shapes
+    `BeliefTable` carries, so gate 1 can compare them field by field.
+    """
+    plays_cards = np.zeros(52, dtype=np.int64)
+    plays_seats = np.zeros(52, dtype=np.int64)
+    for k, (s, c) in enumerate(all_plays):
+        plays_cards[k] = c
+        plays_seats[k] = s
+    probs = np.zeros((3, 52), dtype=np.float64)
+    hand_sizes = np.zeros(3, dtype=np.int64)
+    void_masks = np.zeros(3, dtype=np.int64)
+    unseen_cards = np.zeros(52, dtype=np.int64)
+    sizes = np.zeros(3, dtype=np.float64)
+    n_unseen, status = _evidence(
+        np.int64(obs_hand), plays_cards, plays_seats, len(all_plays),
+        np.int64(observer), int(level), bool(respects_voids), probs,
+        hand_sizes, void_masks, unseen_cards, sizes)
+    _raise_status(status)
+    unseen_mask = 0
+    for j in range(n_unseen):
+        unseen_mask |= 1 << int(unseen_cards[j])
+    voids = [{s for s in range(4) if (int(void_masks[i]) >> s) & 1}
+             for i in range(3)]
+    return probs, voids, [int(x) for x in hand_sizes], unseen_mask
+
+
+def honest_decision(view, arrangements, observer: int, n_inner: int,
+                    level: int, respects_voids: bool, rng,
+                    max_restarts: int = 200):
+    """Adapter for `honest_decision_kernel`.
+
+    `arrangements` is the OUTER worlds (a list of 3 bitmasks each, in
+    `BeliefTable.opponent_seats` order) -- so the choice-aware posterior path
+    fuses exactly as the constraint-sampler path does.
+
+    PRE-DRAWN SEEDS. The unfused path draws one `rng.integers(2**63)` per
+    inner re-determinization, and how many of those there are is only known
+    once the playouts have been run. So: snapshot the Generator, pre-draw the
+    exact upper bound `n_cand * n_worlds` with the SAME scalar call, let the
+    kernel consume `m` of them in order, then restore the snapshot and re-draw
+    exactly `m`. The Generator therefore ends in the state the unfused path
+    would leave it in, having produced the same values in the same order, and
+    every world/playout/mean/card downstream is bitwise identical.
+
+    Returns `(best_card, inner_fallbacks, inner_failed_samples, avgs)`, where
+    `avgs` is one mean score per legal card in ascending card order.
+    """
+    all_plays = list(view.history) + list(view.current_trick)
+    n_real = len(all_plays)
+    real_cards = np.zeros(52, dtype=np.int64)
+    real_seats = np.zeros(52, dtype=np.int64)
+    trick_cards0 = np.zeros(4, dtype=np.int64)
+    trick_seats0 = np.zeros(4, dtype=np.int64)
+    for k, (s, c) in enumerate(all_plays):
+        real_cards[k] = c
+        real_seats[k] = s
+    for i, (s, c) in enumerate(view.current_trick):
+        trick_cards0[i] = c
+        trick_seats0[i] = s
+
+    from openhearts.engine import cards as _cards  # local: avoids cycle
+
+    legal_cards = np.array(_cards.cards_in(view.legal_moves), dtype=np.int64)
+    arr = np.array([[int(h) for h in w] for w in arrangements],
+                   dtype=np.int64).reshape(len(arrangements), 3)
+    opp_seats = np.array([(observer + 1 + i) % 4 for i in range(3)],
+                         dtype=np.int64)
+    n_max = int(legal_cards.shape[0]) * int(arr.shape[0])
+    state0 = rng.bit_generator.state
+    seeds = np.empty(n_max, dtype=np.int64)
+    for k in range(n_max):
+        seeds[k] = rng.integers(2**63)
+
+    best, n_fb, n_fs, n_used, avgs, status = honest_decision_kernel(
+        np.int64(view.hand), opp_seats, real_cards, real_seats, n_real,
+        trick_cards0, trick_seats0, len(view.current_trick),
+        bool(view.hearts_broken), int(view.trick_number),
+        np.array(view.scores, dtype=np.int64), np.int64(observer),
+        arr, legal_cards, int(n_inner), int(level), bool(respects_voids),
+        int(max_restarts), seeds)
+
+    # Rewind to before the pre-draw and advance by exactly the number the
+    # unfused path would have drawn. Restoring first and re-drawing (rather
+    # than trying to "un-draw") is what makes the end state exact.
+    rng.bit_generator.state = state0
+    for _ in range(int(n_used)):
+        rng.integers(2**63)
+
+    _raise_status(status)
+    assert best >= 0, "fused honest decision returned no card"
+    return int(best), int(n_fb), int(n_fs), avgs
 
 
 # --------------------------------------------------------------------------

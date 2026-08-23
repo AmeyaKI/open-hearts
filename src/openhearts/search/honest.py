@@ -39,6 +39,32 @@ world the "observed" plays after our candidate are ones the playout itself
 invented, so auditing them would only measure how well the imagined world
 explains its own imagined plays. There is no choice evidence in there to read.
 
+Phase 2.8 adds an optional `fused=True`. It changes no semantics and no
+numbers: the whole candidate x world evaluation loop (including the inner
+re-determinization) runs inside one compiled call instead of crossing the
+Python boundary per playout segment.
+
+It is BITWISE identical to the unfused JIT path, deliberately. The obvious
+implementation -- seed numba's generator once per decision and draw a
+continuous stream -- would have changed the rng stream and made verification
+statistical only. Instead the orchestrator PRE-DRAWS the seeds: the outer
+sample happens in Python exactly where it always did, and then the seeds for
+the inner re-determinizations are drawn up front with the same scalar
+`rng.integers(2**63)` call, consumed by the kernel in the same order, and the
+Generator is rewound and advanced by exactly the number consumed. Same worlds,
+same playouts, same per-candidate means, same card, same rng end state.
+See `kernel.honest_decision`.
+
+It is still DEFAULT OFF until the gates are signed off: every committed row --
+the 2.869 bridge included -- stays reachable with the flag off, and
+`OPENHEARTS_NO_JIT=1` never takes the fused branch at all.
+
+Scope note for a future task: `ValueSearchPlayer` / `ProfiledSearchPlayer`
+are NOT fused here. Their horizon path would hook in at the same place this
+one does -- `_use_fused()` below -- by passing their fused scorer down into
+the kernel's inner evaluation in place of `_inner_best`'s heuristic playouts.
+That is deliberately left undone.
+
 `n_inner=0` disables re-determinization entirely: the player then reduces
 exactly to Phase-1 `SearchPlayer`, drawing the identical rng stream, so old
 rows stay reproducible and the two can be compared on the same deals -- with
@@ -56,11 +82,19 @@ from openhearts.sampler.sampler import sample_arrangement
 from openhearts.search.decision import SearchPlayer, state_from_view
 
 
+_LEVEL_CODE = {
+    Level.UNIFORM: kernel.LEVEL_UNIFORM,
+    Level.VOIDS: kernel.LEVEL_VOIDS,
+    Level.FULL: kernel.LEVEL_FULL,
+}
+
+
 class HonestSearchPlayer:
     def __init__(self, level: Level, n_outer: int, n_inner: int, rng,
                  sampler_respects_voids: bool = True,
                  jit_sampler: bool = True,
-                 posterior_factory=None):
+                 posterior_factory=None,
+                 fused: bool = False):
         self.level = level
         self.n_outer = n_outer
         self.n_inner = n_inner
@@ -78,7 +112,16 @@ class HonestSearchPlayer:
         # Phase-2 behaviour bitwise: no extra rng is drawn, no extra branch
         # is taken.
         self.posterior_factory = posterior_factory
-        self.fallbacks = 0          # outer decisions that fell back to heuristic
+        # Phase 2.8, DEFAULT OFF until the lead flips it. Only ever consulted
+        # through `_use_fused()` below, so NO_JIT mode, the Phase-1 reduction
+        # (n_inner=0) and the Python-sampler config all keep their exact old
+        # code path with the flag in either position.
+        self.fused = fused
+        # Per-candidate mean scores from the most recent FUSED decision
+        # (diagnostic, for the gate tests). The unfused reference loop is left
+        # untouched and does not set it.
+        self.last_avgs = None
+        self.fallbacks = 0         # outer decisions that fell back to heuristic
         self.failed_samples = 0     # outer arrangements the sampler could not build
         # Decisions where the posterior found no surviving world and we fell
         # back to the constraint sampler. The plan's truth-safety rule calls
@@ -99,6 +142,26 @@ class HonestSearchPlayer:
         if n_inner > 0:
             self._inner = SearchPlayer(level, n_inner, rng,
                                        sampler_respects_voids, jit_sampler)
+
+    def _use_fused(self) -> bool:
+        """May this decision run the fused kernel? One place, overridable.
+
+        All four conditions are load-bearing:
+        - `fused`: opt-in, default off.
+        - `n_inner > 0`: with no inner re-determinization there is nothing to
+          fuse and the Phase-1 rng reduction must stay exact.
+        - `jit_sampler`: the unfused inner would otherwise use the PYTHON
+          sampler, which consumes the caller's Generator once per card. The
+          kernel reproduces the compiled batch sampler's stream, not that one,
+          so fusing there would silently change results.
+        - `jit_enabled()`: `OPENHEARTS_NO_JIT=1` forces the reference paths.
+
+        Subclasses that hook into `_playout` (the exploiter's nested champion)
+        MUST override this to return False -- the fused kernel runs its own
+        playouts in compiled code and cannot see a Python hook.
+        """
+        return (self.fused and self.n_inner > 0 and self.jit_sampler
+                and kernel.jit_enabled())
 
     @property
     def inner_fallbacks(self) -> int:
@@ -132,6 +195,20 @@ class HonestSearchPlayer:
             if len(arrangements) * 2 < self.n_outer:
                 self.fallbacks += 1
                 return self._heuristic.choose(view)
+
+        if self._use_fused():
+            # Steps 3-4 in one crossing. Same worlds in (constraint sampler or
+            # posterior alike), same seeds, same tie-break out -- bitwise.
+            card, n_fb, n_fs, avgs = kernel.honest_decision(
+                view, arrangements, view.seat, self.n_inner,
+                _LEVEL_CODE[self.level], self.sampler_respects_voids,
+                self.rng)
+            # Keep `inner_fallbacks` / `inner_failed_samples` reporting the
+            # same quantities they report on the unfused path.
+            self._inner.fallbacks += n_fb
+            self._inner.failed_samples += n_fs
+            self.last_avgs = avgs
+            return card
 
         base_score = view.scores[view.seat]
         best_card, best_avg = None, None
