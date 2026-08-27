@@ -7,8 +7,8 @@ drift breaks the project's bitwise-reproducibility standard.**
 Evidence (runs on this branch):
 - Run 33025568739 / 33026436091: an x86 (AMD EPYC) runner FAILED
   tests' bitwise tripwire — one belief-table probability differed from the
-  arm64 reference by exactly 1 ULP (last mantissa bit), i.e. numpy's SIMD
-  summation path differs by architecture. One ULP in a belief occasionally
+  arm64 reference by a few ULPs in the low mantissa byte, i.e. numpy's SIMD
+  summation path differs by architecture. A few ULPs in a belief occasionally
   flips a card choice, which changes game trajectories — a benchmark there
   is a different experiment than the pre-registered one.
 - Worse: one runner PASSED the same suite and another FAILED it — results
