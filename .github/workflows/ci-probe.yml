@@ -45,6 +45,7 @@ jobs:
 
       - name: R0 block 0 run (25 deals, 4 workers, fast kernels)
         run: |
+          mkdir -p results
           time python experiments/run_exploit_eval.py --rows R0 --deals 25 --workers 4 --fast --out results/ci_probe_R0.txt
 
       - name: Bitwise comparison vs local reference
