@@ -1,9 +1,11 @@
 """CI probe: compare a freshly-run R0 block 0 against the committed local
 reference for exact (string-formatted) bitwise equality.
 
-Reference: ci/r0_block0_reference.txt = the R0@0 line copied verbatim from
-the locally banked results/exploit_R0_partial.txt (arm64 Mac, 2026-08-23 C2
-run, code revision dc72231) -- the same bank the real paired analysis uses.
+Reference: ci/r0_block0_reference.txt, generated locally on an arm64 Mac
+2026-08-26 by `run_exploit_eval.py --rows R0 --deals 25 --workers 8 --fast`
+(the banked results/exploit_R0_partial.txt only had blocks 1-5, not block 0,
+so this fixture was generated fresh -- both sides come from the same code
+revision, not a pre-existing historical bank).
 
 CI side: results/exploit_R0_partial.txt produced by the matching run in this
 workflow (fresh checkout, no prior partial file, so block 0 lands there).
