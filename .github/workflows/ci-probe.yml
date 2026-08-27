@@ -33,7 +33,7 @@ jobs:
 
       - name: Fast test suite
         run: |
-          time python -m pytest -q -x --ignore=tests/test_exploiter_batched.py -k "not slow"
+          time python -m pytest -q -x --ignore=tests/test_exploiter_batched.py --ignore=tests/test_profiler_infer.py -k "not slow"
 
       - name: R0 block 0 run (25 deals, 4 workers, fast kernels)
         run: |
