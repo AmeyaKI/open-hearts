@@ -6,7 +6,7 @@ Hearts is an imperfect-information game — you never see the other players' han
 
 Every number below is measured on matched deals with confidence intervals. The experiments that came out negative are published next to the ones that didn't.
 
-**Status:** Phases 1–5 complete; Phase 6 (external benchmarking, opponent-predictability curve) in progress. ~17k lines across engine, inference, search, and evaluation; 289 tests. House rules: no passing round, no shoot-the-moon.
+**Status:** Phases 1–6 complete: 6A's entropy curve, the C-bench external benchmark, and 6C's exploitability measurement are all closed (6B, the human-data relay, is built but has not been run yet — see Phase 6 below). ~17k lines across engine, inference, search, and evaluation; test suite green in both JIT modes. House rules: no passing round, no shoot-the-moon.
 
 ## Results at a glance
 
@@ -20,6 +20,7 @@ Hearts deals 26 points per hand among 4 players, so **6.5 points/hand is symmetr
 | vs. 3 held-out synthetic personalities | **2.35** [2.17, 2.52] | 500 deals × 4 rotations |
 | *control:* heuristic vs. three copies of itself | 6.50 | break-even alarm |
 | *floor:* random legal play | 11.55 | — |
+| **Exploitability** — strengthened search attacker vs. the frozen champion | **+0.20** [+0.07, +0.33] extra pts/hand taken (minor leak; hardening not triggered) | 250 deals × 4 rotations |
 
 **Hidden-card inference.** Top-1 accuracy at locating an opponent's card by the last trick, over 2,000 games: **33%** with no information → **48%** from voids alone → **60%** with full constraint propagation → **90%** when opponents' *choices* are also read. That last figure holds only against a known policy and collapses against unfamiliar opponents — quantified in Phase 3 and Phase 5 below, not hidden.
 
@@ -395,6 +396,92 @@ PRIMARY (RI and/or RIA beats CHOICE-soft, CI excludes 0): PASS. SECONDARY (monot
 
 One axis, whole story: random legal play eats 11.5 points a hand, a competent rule-follower 6.5, any sampled-playout search roughly halves that, and choice-aware beliefs through the honest search reach 2.87 — an 11% share of each hand's 26 points, against opponents taking ~30% each.
 
+## Phase 6: contact — a real opponent, and a look in the mirror
+
+Phase 5 closed on a live question: reading opponents (Phase 3's crown achievement, 2.87 pts/hand against a fully scripted heuristic) bought almost nothing against Phase 5's noisy synthetic population — even a mind-reading oracle gained nothing there. But that population was deliberately whimsical (3–25% pure noise per decision, by design). Real people aren't whim machines; they're creatures of habit. Phase 6 asks three questions the project had never asked before: was reading tested only in a hurricane (**6A**)? How do we actually compare to somebody else's Hearts bot (**C-bench**)? And how hard could a dedicated student hit our own bot back (**6C**, exploitability)? A fourth prong, **6B** — a terminal relay for logging real human games — was built to spec this phase but has not yet been run; the owner waived the live-session gate rather than wait for it, so everything below is still measured against synthetic opponents or against the bot's own reflection, not against people.
+
+### 6A: the entropy curve (2026-08-19) — reading, tested at last against habit
+
+**The idea.** Rebuild the Phase 5 personality population with one new dial, **habit strength**, running from H0 (near-deterministic habits — epsilon 0.005–0.02, strong convictions) to H3 (noisier than Phase 5's own population). Everything else about a personality — its original 12 style axes, plus three new Phase-6 axes added to widen the strategy space (*safe-trick high-dumping* — the "Priya move": fourth to a safe trick holding Q♣ and 8♣, deliberately winning with the Q♣ to unload a dangerous high card cheaply; *void engineering* — deliberately playing off a short suit early to set up a discard-ready void; *leader-feeding* — dumping points on whoever is already winning big) — stays fixed at every setting; only predictability moves. The guessing curves and a slim paired ablation (honest-FULL, CHOICE-strict, profiled-R, profiled-ORACLE) then re-run at each setting, on the *same* 250 deals and the *same* held-out trios throughout, so the dial is the only thing that changes.
+
+**The curve** (`results/entropy_curve.txt`; reading value = paired per-deal honest-FULL − reading row; positive would mean reading beats plain counting):
+
+| setting | entropy (nats) | honest-FULL | ORACLE (perfect identity) | ORACLE reading value | 95% CI |
+|---|---|---|---|---|---|
+| H0 — near-deterministic habits | 0.697 | 2.739 | 2.941 | −0.202 | (−0.452, +0.048) |
+| H1 | 0.953 | 2.393 | 2.795 | −0.402 | (−0.678, −0.131) |
+| H2 — ≈ Phase 5's range | 1.179 | 2.284 | 2.624 | −0.340 | (−0.600, −0.082) |
+| H3 — noisier than Phase 5 | 1.300 | 2.110 | 2.469 | −0.359 | (−0.602, −0.115) |
+
+Reading — even ORACLE, the deployment-impossible row that's handed the opponent's *true* personality — HURTS at every predictability setting, three of four CIs excluding zero entirely. The best number anywhere, including the rare-moment slices (deals where the Q♠ is live and exposed), is H0's QS-EXPOSED cell at **+0.064 pts/hand**, nowhere close to the pre-registered +0.3 survival bar.
+
+**Against pre-registration, verbatim:** "reading value increases monotonically as habit strengthens" — **FAILS** (H3 −0.359 → H2 −0.340 → H1 −0.402 → H0 −0.202, not monotone). "at H0 it becomes clearly positive (≥0.3)" — **FAILS** (−0.202). "at H2 it lands near Phase 5's ≈0" — **FAILS** (−0.340 vs. Phase 5's −0.048; a real finding about the new contextual axes, not a harness bug). Two expectations **PASS**: CHOICE-strict's collapse rate does fall as habit strengthens (0.831 at H0 → 0.836 at H3, exactly the pre-registered "habitual ≠ script-like" possibility), and the rare-moment slices do exceed the overall mean at some settings.
+
+**Three findings worth carrying forward.** (1) *The guessing-vs-points inversion, a third time, sharper than ever*: at H0, ORACLE guesses the true card with mean probability 0.475 against honest-FULL's 0.390 — genuinely better reading — while still losing points. Working hypothesis, labeled as such: likelihood-weighting narrows the diversity of imagined worlds, so a sharper-looking posterior can quietly be a *narrower*, not just a *more accurate*, one. (2) *Habitual opponents are harder for everyone*, reading or not: honest-FULL alone scores 2.74 pts/hand against H0 opponents versus 2.11 against H3 — discipline beats caprice regardless of whether anyone is reading it. (3) The dial worked as designed — H0 personalities are habitual in their *own* 15-axis style, including the three new moves the old beginner script cannot predict at all, so "habitual" turned out not to mean "predictable by the old script."
+
+**Verdict, per the pre-registered decision rule.** Reading value stayed under +0.3 at every H0/H1 setting, overall and rare-moment slices alike → **reading is RETIRED from the main line** (archived, not deleted). Consequence: the bot's identity is now settled — count perfectly, search hard, assume nothing about the opponent — and the Phase 5 profiler/adaptation machinery (Organs 1 and 2) stops receiving further investment. Standing caveat: this is still synthetic evidence; 6B's human logs, whenever they land, are the only thing that can actually overturn it.
+
+### C-bench (2026-08-21) — the first opponent we didn't build ourselves
+
+Five phases measured the bot exclusively against opponents of its own design. C-bench plays the frozen champion (honest-FULL) against OpenSpiel's generic ISMCTS bot (1,000 simulations) — the project's first third-party calibration point. **xinxin**, the academic reference Hearts bot the comparison was designed around, needs a from-source build with an older C++ toolchain (Apple-Silicon success uncertain); the owner deferred that build rather than sink time into it, so the generic ISMCTS bot stood in.
+
+Both directions, 1,000 matched deals, seeds 100000+, no pass / no moon on both sides (`hearts(pass_cards=False, qs_breaks_hearts=False)`):
+
+| direction | ours | ISMCTS | scale |
+|---|---|---|---|
+| ours-minority (1 of us vs. 3× ISMCTS) | **4.702**, 95% CI (4.557, 4.846) | 7.100 | 1,000 deals |
+| ours-majority (3× us vs. 1 ISMCTS) | **5.768**, 95% CI (5.705, 5.832) | 8.697, 95% CI (8.505, 8.885) | 1,000 deals |
+
+Both pre-registered expectations were met verbatim: honest-FULL beats ISMCTS comfortably in both seatings, at comparable per-decision cost (ours 0.146s vs. ISMCTS 0.111s, contended) — a real search bot, not a pushover, outplayed at similar computational cost.
+
+**What this does NOT show.** This match tests strength against a standard third-party bot at comparable cost. It does **not** test the project's headline speed claim (~0.13s/turn for us vs. xinxin's reported ~2.9s/turn), because xinxin was never built here — that comparison stays open.
+
+**A quieter, honest finding.** ISMCTS turned out to be a materially tougher opponent than anything the project ever built for itself: honest-FULL scores 2.35 pts/hand against Phase 5's synthetic heuristic/personality trios but 4.70 against ISMCTS — a real search bot makes us work harder for our points than our own synthetic gym ever did. Every training and evaluation opponent across five phases was softer than one stock, off-the-shelf bot.
+
+### Exploitability — measuring our own chin
+
+**The design, in two sentences.** The exploiter is our own `HonestSearchPlayer`, except when it imagines the future, the champion's seat is played not by the beginner heuristic but by a reduced-size copy of the champion's *own* search algorithm, nested inside the exploiter's imagination, so a trap only effective against a real searcher can actually be found. The protocol is 1 exploiter against 3 champions rotated through all four seats; the control is the champion attacking itself (four champions must average 6.5 by symmetry, the project's existing mirror alarm), and the exploiter with its model switched off is bitwise-identical to plain honest-FULL, so no strength confound sits between the "ordinary opponent" baseline and the measuring instrument.
+
+**A probe result that reframed the whole design, first.** Asking the champion the same real decisions twice, changing only the dice used to imagine hidden hands, it played a *different* card 30–39% of the time — a near-coin-flip in the opening (agreement ~0.57–0.70) but a near-book (agreement 0.93–0.96) in the endgame, once the hidden cards are nearly pinned down. The champion is not the deterministic book the project's own review had assumed; where a leak could live, and how bookish the attacker's imagination needs to be, both trace back to this.
+
+**Crude attacker** (`results/exploit_eval_A.txt`, 5×2 nested model, one imagined ply, 500 deals):
+
+| row | champion-side pts/hand | 95% CI |
+|---|---|---|
+| exploitability (R1 − R0) | **+0.079** | [−0.014, +0.172] |
+
+The point estimate sits inside the ROBUST band (<0.1), but the CI spans robust through minor-leak and includes zero: cannot certify robust, cannot claim a leak. **The single-victim variant** (`results/exploit_eval_B.txt`, one champion + two heuristics + the exploiter, 250 deals) came back null — **−0.015, CI [−0.283, +0.251]** — and the exploiter seat itself scored *worse* than a plain champion would have in that seat (+0.155 exploiter-side): the same inversion 6A found. A model of the opponent narrowed the exploiter's own imagination and cost it points rather than helping.
+
+**Strengthened student** (`results/exploit_eval_R1v.txt`, owner-approved escalation: 20×5 nested model, 2 imagined plies, VOIDS-level nested posterior for speed). First, did the bigger model actually imitate the champion better? Fidelity rose from 0.596 to 0.682 against a 0.727 ceiling (the champion's own agreement with itself under a different seed) — closing 66% of the gap:
+
+| tricks | 5×2 (crude) | 20×5 (strengthened) | ceiling |
+|---|---|---|---|
+| all | 0.596 | 0.682 | 0.727 |
+| 1–4 | 0.370 | 0.464 | 0.587 |
+| 5–9 | 0.575 | 0.695 | 0.695 |
+| 10–13 | 0.925 | 0.943 | 0.962 |
+
+With the stronger student running (250 deals, seeds 100000–100249):
+
+| row | champion-side pts/hand | 95% CI |
+|---|---|---|
+| exploitability (R1v − R0) | **+0.1977** | [+0.0683, +0.3273] |
+
+**The project's first significant exploitability result** — the crude attacker's CI had included zero; this one doesn't. **Verdict per the pre-registered bars: MINOR LEAK (0.1–0.3)** — documented; hardening is **not** triggered (that requires >0.3).
+
+**Where the edge lives.** The trade is the same shape as the crude attacker's, amplified: the strengthened exploiter takes fewer points in the endgame than a plain champion would (its tricks-10-13 haul is 2.18 vs. the baseline champion's 3.02), while champions attacked by it bleed more there (3.26). The queen moves the exploiter's way too (2.94 for the exploiter vs. 3.41 for the baseline champion). The nested model's next-card prediction hit-rate against the real champion is only **0.293** — the exploiter doesn't need to call individual cards correctly; getting the endgame *tendency* right is enough.
+
+**Honest caveats, stated up front.** Every stronger student found more (+0.079 crude → +0.198 strengthened), so +0.198 is a **lower bound** — a full-size nested model, or eventually a genuinely learned attacker, likely finds more still. 250 deals resolves ROBUST-vs-REAL-LEAK but not the edges of the 0.1–0.3 band itself; the CI brushes both 0.068 and 0.327. And the attacker remains a search best-response, not a learned RL attacker — route (b) from the C0 design (an OpenSpiel-wrapped learned attacker) was never triggered, because a leak this size doesn't clear the bar the plan set for escalating.
+
+**Exploitability is now a standing regression test**, re-run after every future bot change (`run_exploit_eval.py --rows R0,R1v --fast`), not a one-off measurement.
+
+### Infrastructure findings worth recording
+
+- **Fused decision kernel (Phase 2.8).** The whole candidate × world loop, including honest search's inner re-determinization, now runs inside one compiled call instead of many Python-mediated ones, using pre-drawn RNG seeds so the fused path stays bitwise-identical to the unfused one (718 decisions checked exactly, plus a 311-decision hostile corpus built specifically to force every fallback branch). **5.3×** on a single seat (147 → 28 ms/decision), 5.2× across four. Default off; opt-in per experiment.
+- **Equivalence-class card grouping.** Cards that are provably interchangeable (e.g. the lowest two clubs, when nothing live sits between them and neither is the Q♠) are proven — by a theorem checked against a matched-seed control, 268 decisions and 881 classes — to score identically, so they're evaluated once instead of twice. The diagnostic this surfaced is worth keeping on its own: on the *ungrouped* path, the search's own imagined score for two mathematically identical cards differs by a mean of **0.455 points**, and is exactly zero in only 44.9% of cases — a direct measurement of how much of the project's "39% self-disagreement" number (the C0 probe above) is pure sampling noise on cards the bot cannot actually tell apart. Grouping is theorem-safe but consumes a different sequence of rng draws, so it is **not bitwise-compatible with the banked exploitability rows** and was kept **OFF** for the exploit run — it becomes its own bot version, to be measured properly in Phase 7.
+- **Batched nested model.** Compiling the exploiter's several hundred miniature-champion calls per decision into one kernel call bought **1.29×** on the full R1 row (1.38× on the exploiter seat alone) — well short of the 5–10× the roadmap projected. The honest reason: the roadmap assumed Python glue dominated the cost; profiling showed it was only ~0.16ms of ~0.58ms per nested call, with the rest being compiled belief-rebalance work that batching cannot touch. Stacked with kernel fusion, the combined, measured speedup on the exploit row is **4.36×** (13.11 → 3.01 s/game) — enough to turn a multi-hour exploitability run into a 20-minute one, which is what makes the new standing regression test affordable to actually run after every change.
+- **A negative portability result.** Every bitwise-reproducibility claim elsewhere in this README (JIT-on vs. `OPENHEARTS_NO_JIT=1`, fused vs. unfused kernels, grouped vs. matched-seed ungrouped) has so far been checked on one machine, an Apple Silicon Mac. A GitHub Actions CI probe testing the same guarantee on x86 runners found it does **not** travel: on an Intel Xeon 6973P-C runner, the project's own bitwise tripwire test (`test_fused_audit.py::test_posterior_is_identical_through_the_factory`, which compares a fused belief posterior's probabilities byte-for-byte against the unfused reference) **failed** — several probability values differed by a few ULPs in their low mantissa bits. The identical suite passed cleanly on a *different* GitHub-hosted runner, an AMD EPYC 7763 (290 passed, 10 skipped). **Bitwise reproducibility is architecture-specific, not just a JIT-on/off question** — results differed even between two of GitHub's own machines, let alone between GitHub and the project's own Mac. Cross-platform runs are invalid under this project's bitwise standard; every gate in this README should be read as "bitwise on the machine it was measured on," not as a universal guarantee.
+
 ## Known limitations
 
 Stated plainly, not hidden:
@@ -415,3 +502,9 @@ Stated plainly, not hidden:
 14. **Population realism is now the phase's single biggest assumption.** The 12-axis personality family plus a per-decision noise floor is a real, checked-for-divergence population, but it is not moods, not mid-match adaptation on the *opponents'* side, and not multi-trick planning — three things a real human brings that this population does not simulate. Every play-strength and guessing number in this phase is scoped to synthetic opponents built this way; the standing owner caveat (limitation (b) above) is that this may make reading look weaker here than it would against real people, not stronger.
 15. **Match-blocked adaptation is scoped to within-block continuity.** `SeatMixture`'s "getting to know you" effect only accumulates evidence within one fixed-trio block (25 deals here); it resets on reseating and was never tested against opponents who change strategy mid-match (a "style-shifting player," floated as a contingency population enrichment in the plan but never built, since Task 4/6 evidence didn't call for it).
 16. **House rules stay in force.** As in Phases 1–4, no passing and no moon-shooting; every number in this section assumes the 26-point normal split. This was a standing design decision for any real play this phase might have collected data from (the relay, deferred), and it keeps every Phase 1–5 result directly comparable.
+17. **Reading is retired on synthetic evidence only.** The Phase 6A entropy curve found reading hurts at every habit-strength setting the project could build (H0–H3, entropy 0.70–1.30 nats), including a near-deterministic H0. But H0 is still a synthetic personality with a per-decision noise floor as low as 0.5% and three hand-designed contextual axes — not a real person. The 6B human relay (built, spec'd for exactly this test) has not been run this phase; the decision to retire reading was made entirely on synthetic grounds, and the plan's own standing caveat is that it could reverse once real human logs exist.
+18. **C-bench did not test the project's speed claim.** The generic OpenSpiel ISMCTS bot, not xinxin (the academic reference bot the comparison was designed for), was the opponent — xinxin needs a from-source build this phase deferred. The strength comparison (we beat ISMCTS comfortably at comparable per-decision cost) is real; the ~20× speed-vs-xinxin claim remains unverified by any third party.
+19. **Exploitability is a lower bound from a depth-limited, non-learned attacker.** The exploiter nests only the first one or two imagined decisions of a reduced-size copy of the champion (20×5 at best, vs. the champion's own 50×20), reaching only 68% overall agreement with the real champion's choices. Every strengthening tried so far found a bigger leak, not a smaller one (+0.079 → +0.198 champion-side); a full-size nested model or a genuinely learned attacker (the OpenSpiel-adapter route the design pre-registered but never triggered) would plausibly find more. "Minor leak, hardening not triggered" describes what this instrument found, not a ceiling on what a better instrument could find.
+20. **No mixed-strategy hardening was built.** The measured leak (0.1–0.3 champion-side) sits below the >0.3 bar the plan set for triggering a hardening experiment, so none was attempted — the bot still plays the same deterministic-given-beliefs policy it always has, protected only by the accidental Monte-Carlo noise in its own search (itself partly explained now by equivalence-class grouping's diagnostic, and itself something a future optimization like stratified sampling could reduce — exactly why the leak is watched as a standing regression rather than closed as a settled fact).
+21. **Bitwise reproducibility is architecture-specific.** Every deterministic-path guarantee elsewhere in this README was measured on one Apple Silicon Mac. A GitHub Actions probe found the identical guarantee fails on at least one x86 runner (differing by a few ULPs) while passing cleanly on another — so none of this project's bitwise claims should be read as portable across hardware without re-verification on the target machine.
+22. **The human-data clock has not started.** 6B (the terminal relay for logging real games) was built to spec, but the owner's live-session gate for 6C was waived rather than met — Phase 6's entropy-curve and exploitability results are both measured entirely on synthetic self-play. The project's headline goal, beating real human players, remains untested end to end.
