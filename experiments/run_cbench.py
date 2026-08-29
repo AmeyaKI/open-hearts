@@ -146,10 +146,31 @@ def play_one_deal_rotated(deal_seed, direction, n_outer, n_inner, max_simulation
     return our_total / 4.0, ismcts_total / 4.0, our_times, ismcts_times
 
 
-def _partial_paths(direction):
-    final = os.path.join(RESULTS, f"cbench_{direction}.txt")
-    partial = os.path.join(RESULTS, f"cbench_{direction}_partial.txt")
+def _partial_paths(direction, n_outer=N_OUTER_DEFAULT, n_inner=N_INNER_DEFAULT):
+    """Partial/final paths, CONFIG-QUALIFIED for non-default search sizes.
+
+    Phase 7 Task A3 runs this script at several (n_outer, n_inner) operating
+    points. The original paths were keyed by direction alone; letting a
+    100x20 run resume from the banked 50x20 partial would silently mix two
+    different bots' deals into one file -- and the banked partials are
+    append-only reference data for the published C-bench numbers. The
+    default config keeps its legacy names so those banked files stay
+    resumable; every other config gets its own pair.
+    """
+    cfg = ""
+    if (n_outer, n_inner) != (N_OUTER_DEFAULT, N_INNER_DEFAULT):
+        cfg = f"_{n_outer}x{n_inner}"
+    cfg += _PARTIAL_TAG
+    final = os.path.join(RESULTS, f"cbench_{direction}{cfg}.txt")
+    partial = os.path.join(RESULTS, f"cbench_{direction}{cfg}_partial.txt")
     return final, partial
+
+
+#: Optional path suffix (set from --partial-tag) so a DEFAULT-config run can
+#: be routed away from the banked legacy files -- e.g. A3's same-environment
+#: incumbent control, which must not resume from (or append to) the published
+#: C-bench partial. Empty for every historical invocation.
+_PARTIAL_TAG = ""
 
 
 def _load_partial(partial_path):
@@ -174,7 +195,18 @@ def _append_partial(partial_path, key, val):
 
 
 def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_base):
-    final_path, partial_path = _partial_paths(direction)
+    final_path, partial_path = _partial_paths(direction, n_outer, n_inner)
+    # Loud guard: if the partial's header records a different config than
+    # this run, refuse -- resuming across configs would mix two bots' deals.
+    if os.path.exists(partial_path):
+        with open(partial_path) as f:
+            first = f.readline()
+        want = f"n_outer={n_outer} n_inner={n_inner}"
+        if first.startswith("#") and want not in first:
+            raise AssertionError(
+                f"{partial_path} header does not match this run's config "
+                f"({want}): refusing to resume across configs. Header: "
+                f"{first.strip()}")
     banked = _load_partial(partial_path)
     deal_seeds = [seed_base + i for i in range(n_deals)]
 
@@ -270,7 +302,14 @@ def main():
     ap.add_argument("--n-inner", type=int, default=N_INNER_DEFAULT)
     ap.add_argument("--max-simulations", type=int, default=MAX_SIMULATIONS_DEFAULT)
     ap.add_argument("--seed-base", type=int, default=SEED_BASE)
+    ap.add_argument("--partial-tag", default="",
+                    help="suffix for the partial/final filenames (e.g. "
+                         "'_envcheck') so a default-config run never touches "
+                         "the banked legacy files")
     args = ap.parse_args()
+
+    global _PARTIAL_TAG
+    _PARTIAL_TAG = args.partial_tag
 
     run(args.deals, args.workers, args.direction, args.n_outer, args.n_inner,
         args.max_simulations, args.seed_base)
