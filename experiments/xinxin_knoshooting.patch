@@ -1,0 +1,20 @@
+diff --git a/open_spiel/bots/xinxin/xinxin_bot.cc b/open_spiel/bots/xinxin/xinxin_bot.cc
+index e9e8fb8..19a4624 100644
+--- a/open_spiel/bots/xinxin/xinxin_bot.cc
++++ b/open_spiel/bots/xinxin/xinxin_bot.cc
+@@ -205,7 +205,14 @@ void XinxinBot::ForceAction(const State& state, Action action) {
+ }
+ 
+ int XinxinBot::XinxinRules(GameParameters params) {
+-  int rules = ::hearts::kQueenPenalty;
++  // LOCAL PATCH (open-hearts F2, 2026-08-29): enable xinxin's own native
++  // kNoShooting rule (Hearts.h: "hearts are 1 point each" -- moon-shooting
++  // disabled) so the bot OPTIMIZES the exact objective our no-pass/no-moon
++  // matches SCORE. OpenSpiel's hearts game exposes no moon parameter, so
++  // this cannot be wired from `params`; it is applied unconditionally in
++  // this local build, which is used exclusively for the no-moon variant.
++  // Disclosed in every match header. Stock upstream behavior: flag absent.
++  int rules = ::hearts::kQueenPenalty | ::hearts::kNoShooting;
+   if (params["pass_cards"].bool_value()) rules |= ::hearts::kDoPassCards;
+   if (params["no_pts_on_first_trick"].bool_value())
+     rules |= ::hearts::kNoHeartsFirstTrick | ::hearts::kNoQueenFirstTrick;
