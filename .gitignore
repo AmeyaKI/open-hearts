@@ -6,6 +6,9 @@ results/
 .claude/
 *.md
 !README.md
+!docs/RESEARCH_LOG.md
+# agent-context docs, local-only
+info/
 TODO
 # C++ backend (Track C): build tree and compiled extension modules
 cpp/build/
