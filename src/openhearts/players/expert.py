@@ -138,30 +138,38 @@ def queen_state(hand: int, view: PlayerView) -> str:
     return "unseen"
 
 
+def exit_mask(hand: int, played: int, hearts_broken: bool,
+              trick_number: int) -> int:
+    """Bitmask of exit-predicate cards in `hand`: legal to lead, at least one
+    opponent card of the suit remains, and EVERY remaining opponent card of
+    the suit is higher -- i.e. the card ranks below the LOWEST outstanding
+    card of its suit.  *Interpretation:* hypothetical-lead legality uses
+    `max(t, 1)` so the trick-1 snapshot means "as a lead at the next
+    opportunity", not the forced 2♣.  Pure bit operations per suit (the 7B
+    replay calls this hundreds of thousands of times per game); the corpus
+    pin proves it decides identically to the per-card definition."""
+    lead = legal_moves(hand, (), hearts_broken, max(trick_number, 1))
+    unseen = ~(hand | played) & cards.FULL_DECK
+    m = 0
+    for s in range(4):
+        o = cards.SUIT_MASK[s] & unseen
+        if o:
+            lowest = o & -o                      # lowest outstanding card bit
+            m |= lead & cards.SUIT_MASK[s] & (lowest - 1)
+    return m
+
+
 def is_exit(card: int, hand: int, played: int, hearts_broken: bool,
             trick_number: int) -> bool:
-    """Exit predicate: legal to lead, at least one opponent card in the suit
-    remains, and EVERY remaining opponent card in the suit is higher.
-    *Interpretation:* hypothetical-lead legality uses `max(t, 1)` so the
-    trick-1 snapshot means "as a lead at the next opportunity", not the
-    forced 2♣."""
-    lead = legal_moves(hand, (), hearts_broken, max(trick_number, 1))
-    if not lead & cards.bit(card):
-        return False
-    o = cards.SUIT_MASK[cards.suit(card)] & ~(hand | played) & cards.FULL_DECK
-    if o == 0:
-        return False
-    return (o & ((1 << (card + 1)) - 1)) == 0
+    """Exit predicate for one card (see `exit_mask`)."""
+    return bool(exit_mask(hand, played, hearts_broken, trick_number)
+                & cards.bit(card))
 
 
 def snapshot_exits(hand: int, played: int, hearts_broken: bool,
                    trick_number: int) -> int:
     """Bitmask of exit-predicate cards in `hand` right now."""
-    m = 0
-    for c in cards.cards_in(hand):
-        if is_exit(c, hand, played, hearts_broken, trick_number):
-            m |= cards.bit(c)
-    return m
+    return exit_mask(hand, played, hearts_broken, trick_number)
 
 
 class Facts:
@@ -176,7 +184,7 @@ class Facts:
         self.queen = queen_state(self.hand, view)
         self.queen_live = self.queen != "captured"
         self.queen_unseen = self.queen == "unseen"
-        self.voids = public_voids(view)
+        self._voids = None                       # E1, computed on demand (L5 only)
         self.t = view.trick_number
         self.hearts_broken = view.hearts_broken
         self.points_remain = sum(view.scores) < 26
@@ -204,11 +212,28 @@ class Facts:
             self.void_in_led = False
             self.kind = "lead"
         self._snap = None
-        ranks = [cards.rank(c) for c in cards.cards_in(self.hand)]
-        self.mean_rank = float(np.mean(ranks)) if ranks else 0.0
-        self.min_rank = min(ranks) if ranks else 0
+        self._ranks = None
 
     # -- derived predicates --------------------------------------------
+    @property
+    def voids(self):
+        if self._voids is None:
+            self._voids = public_voids(self.view)
+        return self._voids
+
+    @property
+    def mean_rank(self) -> float:
+        if self._ranks is None:
+            self._ranks = [cards.rank(c) for c in cards.cards_in(self.hand)]
+        r = self._ranks
+        return float(np.mean(r)) if r else 0.0
+
+    @property
+    def min_rank(self) -> int:
+        if self._ranks is None:
+            self._ranks = [cards.rank(c) for c in cards.cards_in(self.hand)]
+        return min(self._ranks) if self._ranks else 0
+
     @property
     def snap(self) -> int:
         """Snapshot exits over the full current hand (computed lazily)."""
@@ -438,7 +463,7 @@ def _decide(view: PlayerView, p: ExpertParams):
             contribs.append(("L5", {
                 c: -p.w_L5 for c in cands
                 if f.opp_void_count(cards.suit(c)) >= p.void_lead_threshold
-                and not is_exit(c, f.hand, f.played, f.hearts_broken, f.t)}))
+                and not (f.snap & cards.bit(c))}))
         # Q1: hunt with low spades
         if (p.w_Q1 > 0 and f.queen_unseen
                 and 1 <= f.t <= p.queen_hunt_until
@@ -474,7 +499,7 @@ def _decide(view: PlayerView, p: ExpertParams):
                 a = low_after >= need
                 b = (f.kind == "lead" and (f.hand & cards.bit(QS)) and
                      (cards.suit(c) != SPADES
-                      or is_exit(c, f.hand, f.played, f.hearts_broken, f.t)))
+                      or bool(f.snap & cards.bit(c))))
                 if a or b:
                     delta[c] = p.w_guard
             contribs.append(("GUARD", delta))
@@ -571,8 +596,7 @@ def _fallback(f: Facts, cands):
                 return [c for c in cat if cards.rank(c) == top]
         return list(cands)
     # lead
-    exits = [c for c in cands
-             if is_exit(c, f.hand, f.played, f.hearts_broken, f.t)]
+    exits = [c for c in cands if f.snap & cards.bit(c)]
     if exits:
         cands = exits
     if f.queen_live:
