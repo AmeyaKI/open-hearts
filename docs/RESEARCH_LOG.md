@@ -13,6 +13,7 @@ Hearts deals 26 points per hand among 4 players, so **6.5 points/hand is symmetr
 | vs. 3 heuristic opponents — constraint beliefs + honest search | **3.25** [3.07, 3.45] | 500 deals × 4 rotations |
 | vs. 3 heuristic opponents — + opponent choice-reading | **2.87** [2.70, 3.04] | 500 deals × 4 rotations |
 | vs. 3 held-out synthetic personalities | **2.35** [2.17, 2.52] | 500 deals × 4 rotations |
+| vs. 3 held-out rule-based experts (never trained against) | **4.76** [4.55, 4.97] | 500 deals × 4 rotations |
 | *control:* heuristic vs. three copies of itself | 6.50 | break-even alarm |
 | *floor:* random legal play | 11.55 | — |
 | **Exploitability** — strengthened search attacker vs. the frozen champion | **+0.20** [+0.07, +0.33] extra pts/hand taken (minor leak; hardening not triggered) | 250 deals × 4 rotations |
@@ -495,6 +496,53 @@ With the stronger student running (250 deals, seeds 100000–100249):
 - **Equivalence-class card grouping.** Cards that are provably interchangeable (e.g. the lowest two clubs, when nothing live sits between them and neither is the Q♠) are proven — by a theorem checked against a matched-seed control, 268 decisions and 881 classes — to score identically, so they're evaluated once instead of twice. The diagnostic this surfaced is worth keeping on its own: on the *ungrouped* path, the search's own imagined score for two mathematically identical cards differs by a mean of **0.455 points**, and is exactly zero in only 44.9% of cases — a direct measurement of how much of the project's "39% self-disagreement" number (the C0 probe above) is pure sampling noise on cards the bot cannot actually tell apart. Grouping is theorem-safe but consumes a different sequence of rng draws, so it is **not bitwise-compatible with the banked exploitability rows** and was kept **OFF** for the exploit run — it becomes its own bot version, to be measured properly in Phase 7.
 - **Batched nested model.** Compiling the exploiter's several hundred miniature-champion calls per decision into one kernel call bought **1.29×** on the full R1 row (1.38× on the exploiter seat alone) — well short of the 5–10× the roadmap projected. The honest reason: the roadmap assumed Python glue dominated the cost; profiling showed it was only ~0.16ms of ~0.58ms per nested call, with the rest being compiled belief-rebalance work that batching cannot touch. Stacked with kernel fusion, the combined, measured speedup on the exploit row is **4.36×** (13.11 → 3.01 s/game) — enough to turn a multi-hour exploitability run into a 20-minute one, which is what makes the new standing regression test affordable to actually run after every change.
 - **A negative portability result.** Every bitwise-reproducibility claim elsewhere in this README (JIT-on vs. `OPENHEARTS_NO_JIT=1`, fused vs. unfused kernels, grouped vs. matched-seed ungrouped) has so far been checked on one machine, an Apple Silicon Mac. A GitHub Actions CI probe testing the same guarantee on x86 runners found it does **not** travel: on an Intel Xeon 6973P-C runner, the project's own bitwise tripwire test (`test_fused_audit.py::test_posterior_is_identical_through_the_factory`, which compares a fused belief posterior's probabilities byte-for-byte against the unfused reference) **failed** — several probability values differed by a few ULPs in their low mantissa bits. The identical suite passed cleanly on a *different* GitHub-hosted runner, an AMD EPYC 7763 (290 passed, 10 skipped). **Bitwise reproducibility is architecture-specific, not just a JIT-on/off question** — results differed even between two of GitHub's own machines, let alone between GitHub and the project's own Mac. Cross-platform runs are invalid under this project's bitwise standard; every gate in this README should be read as "bitwise on the machine it was measured on," not as a universal guarantee.
+
+## Phase 7: harder opponents and a fairer external comparison (September 2026)
+
+Phase 6 closed with an uncomfortable finding: every opponent the project had built for itself was softer than one stock search bot. The September experiments below are recorded in the order they ran. In the tables, "TallyHearts" is the shipped configuration (honest-FULL, 50 outer worlds × 20 inner re-samples, fused kernel) unless a different size is stated, and differences are in points per hand, so a negative difference is an improvement.
+
+### The expert population and the held-out exam (2026-09-05 to 2026-09-07)
+
+**Why.** TallyHearts scores 2.35 points per hand against the Phase 5 personalities and 4.70 against stock ISMCTS. A training and evaluation population that soft cannot tell a real improvement from noise, so Phase 7 began by building a harder one.
+
+**The population.** 250 rule-based "expert" players are generated from one written catalogue of Hearts principles: queen-of-spades safety, exit-card bookkeeping, void creation, and priorities for unloading dangerous cards. Each expert is a near-deterministic rule-follower with its own sampled style weights. 200 form the training pool. The other 50 are held out and sealed: their parameters are never printed, logged or inspected, and the tooling refuses to dump them. Any change to the catalogue, the sampling or the seed defines a new population version; this one is never edited.
+
+Quality floors were stated before the population was measured, and all were met on the first measurement with nothing retuned (2,024 decisions with more than one legal card):
+
+| Check | Measured | Floor |
+|---|---|---|
+| Mean pairwise disagreement between experts (100 pairs) | 0.131 | ≥ 0.12 |
+| Behavioural duplicates | 0 | 0 |
+| Mean disagreement with the beginner heuristic | 0.228 | ≥ 0.20 |
+| Minimum disagreement with the beginner heuristic | 0.122 | ≥ 0.10 |
+| Four copies of one expert (300 deals × 4 rotations) | brackets 6.5 | brackets 6.5 |
+
+The effective width of the population is smaller than its label count suggests. Thirteen of the 19 optional style weights change at least 0.5% of decisions when switched off, so the population has roughly a dozen live style axes. The variety lives in leads and discards (pairwise disagreement 0.22 to 0.29 on leads) and almost vanishes when following suit late in a hand (0.01).
+
+**The exam** (`experiments/run_ablation7.py`, 500 deals × 4 rotations, on the same deals as the banked personality and ISMCTS rows):
+
+| TallyHearts against | Points/hand | 95% CI |
+|---|---|---|
+| three held-out experts | **4.761** | (4.553, 4.972) |
+| three held-out personalities (Phase 5 row, same deals) | 2.345 | |
+| three stock ISMCTS bots (C-bench row, same deals) | 4.769 | |
+
+Paired on identical deals, the experts cost TallyHearts +2.416 (+2.151, +2.692) more than the personalities and are statistically indistinguishable from stock ISMCTS: −0.009 (−0.289, +0.262).
+
+**Against pre-registration.** "Harder than the personality population; roughly ISMCTS-hard, 4 to 5 points per hand": **met** on both counts. A second, narrower estimate recorded just before launch (3.0 to 3.8) was **wrong** by about a point. Its reasoning, that a scripted player cannot out-search a searcher, underestimated how much the experts' shared queen and exit reflexes cost a search bot. Nothing was adjusted after any measurement, so the population is hard by construction and not by tuning.
+
+**The mirror alarm fired, and was a false alarm.** Four copies of one expert must average 6.5. The 500-deal mirror row read 6.518 (6.501, 6.543), just outside. The cause was investigated before any result was read. 490 of the 500 per-deal values are exactly 6.5, because four identical near-deterministic players produce four identical games, so the interval rests on ten deals. A decisive check on 20,000 fresh deals under two independent seed derivations gave 6.4983 (SE 0.0020) and 6.4987 (SE 0.0021). The harness is symmetric. The lesson is that a percentile-bootstrap alarm designed for noisy opponents is miscalibrated for a near-deterministic population, so later mirror reports also print the fraction of deals at exactly 6.5 and a permutation p-value.
+
+**Diagnostic: does knowing the experts' exact rules help?** Two diagnostic rows hand the search the held-out experts' true decision rules as an exact likelihood over hidden hands. Neither can change the shipped bot. "Reading value" is TallyHearts minus the row, so positive would mean reading helps.
+
+| Row | Points/hand | Reading value | Worlds found |
+|---|---|---|---|
+| Exact likelihood, keep the surviving worlds | 4.965 (4.747, 5.179) | −0.204 (−0.446, +0.035) | no consistent world on 7.0% of decisions; 33.2 of 50 on average |
+| Same likelihood, pool grown and resampled to 50 equal-weight worlds | 4.870 (4.661, 5.079) | −0.110 (−0.329, +0.104) | no consistent world on 2.4% of decisions; 50.0 of 50 |
+
+The pre-registered expectation was that the plain reader would still lose 0.2 to 0.4 points per hand: **met at the edge** (−0.204), with the mechanism measured directly as world starvation. The resampled reader was expected between −0.1 and +0.4; its estimate sits 0.01 outside that band on the low side, with an interval that includes zero, and is read as parity. The scoped claim: against coherent, near-deterministic rule-followers, handing honest search their exact rules is worth nothing measurable. Plain filtering costs about 0.2 points per hand through starvation, and repairing the starvation recovers only statistical parity. This is the third opponent family on which reading fails to beat plain constraint counting.
+
+**Limits.** One population family, generated from one catalogue. The exact-likelihood rows cap the candidate pool at 2,000 worlds, and the cap was reached on 30% to 48% of decisions, so those estimators remain support-limited in the middle game. 500 deals resolve about ±0.22, so a true edge of 0.1 would be invisible. The ISMCTS comparison row is paired on deals only.
 
 ## Known limitations
 
