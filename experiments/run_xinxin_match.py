@@ -76,7 +76,7 @@ SEAT_SEED_BASE = 920_000_000       # fresh stream, disjoint from every prior bas
 #: OUR bot sits in seat s. 14 masks: 4 with one bit, 6 with two, 4 with three.
 TIER2_MASKS = [m for m in range(1, 15)]
 
-OPTS = {"threads": False, "fused": True}
+OPTS = {"threads": False, "fused": True, "bot": "honest"}   # bot: honest | expert-rollout (7C)
 
 
 def wilcoxon_signed_rank(diffs):
@@ -131,9 +131,16 @@ def play_one_game(deal_seed, our_seats, config_id):
         if seat in our_seats:
             seed = SEAT_SEED_BASE + (hash((config_id, deal_seed, seat))
                                      & 0xFFFFFF)
-            our_bots[seat] = HonestSearchPlayer(
-                Level.FULL, N_OUTER, N_INNER, np.random.default_rng(seed),
-                fused=OPTS["fused"])
+            if OPTS.get("bot") == "expert-rollout":
+                from openhearts.players.expert_population import train_ids
+                from openhearts.search.expert_rollout import ExpertRolloutSearchPlayer
+                our_bots[seat] = ExpertRolloutSearchPlayer(
+                    Level.FULL, N_OUTER, N_INNER, np.random.default_rng(seed),
+                    rollout_ids=train_ids())
+            else:
+                our_bots[seat] = HonestSearchPlayer(
+                    Level.FULL, N_OUTER, N_INNER, np.random.default_rng(seed),
+                    fused=OPTS["fused"])
         else:
             xinxin_bots[seat] = build_xinxin_bot(game, None)
 
@@ -226,6 +233,9 @@ def main():
                     help="xinxin internal threading (paper config: off)")
     ap.add_argument("--no-fused", action="store_true",
                     help="disable the (bitwise-gated) fused kernel on our seats")
+    ap.add_argument("--bot", choices=["honest", "expert-rollout"], default="honest",
+                    help="7C: expert-rollout = train-side experts as the opponent "
+                         "playout policy (own output files, never the banked ones)")
     ap.add_argument("--block", type=int, default=None)
     ap.add_argument("--probe", action="store_true",
                     help="3 deals at the requested workers; timing only")
@@ -249,6 +259,7 @@ def main():
     assert args.tier in (1, 2), "--tier 1|2 is required for match runs"
     OPTS["threads"] = args.threads == "on"
     OPTS["fused"] = not args.no_fused
+    OPTS["bot"] = args.bot
 
     n_deals = 12 if args.probe else (2 if args.smoke else args.deals)
     tag = "_probe" if args.probe else ("_smoke" if args.smoke else "")
@@ -260,7 +271,8 @@ def main():
         DEAL_SEED_BASE += 900_000
         args.block = 1
     cfgname = (f"tier{args.tier}"
-               + (f"_{args.direction}" if args.tier == 1 else ""))
+               + (f"_{args.direction}" if args.tier == 1 else "")
+               + ("_expertrollout" if args.bot == "expert-rollout" else ""))
     partial = os.path.join(RESULTS, f"xinxin_{cfgname}{tag}_partial.txt")
     out_path = os.path.join(RESULTS, f"xinxin_{cfgname}{tag}.txt")
 
@@ -300,8 +312,9 @@ def main():
       f"threads={'on' if OPTS['threads'] else 'off'}  |  LOCAL BUILD: "
       f"Release (-O3, BUILD_TYPE env), kNoShooting PATCH ON (xinxin's native "
       f"no-moon rule; disclosed -- rules config, not a strength change)")
-    a(f"ours: honest-FULL {N_OUTER}x{N_INNER}, fused="
-      f"{'on (bitwise-gated)' if OPTS['fused'] else 'off'}")
+    a(f"ours: {'expert-rollout (7C, train experts as opponent playout policy, unfused)' if OPTS.get('bot') == 'expert-rollout' else 'honest-FULL'} "
+      f"{N_OUTER}x{N_INNER}, fused="
+      f"{'on (bitwise-gated)' if OPTS['fused'] and OPTS.get('bot') != 'expert-rollout' else 'off'}")
     a(f"variant: no-pass / no-moon (game {adapter.GAME_STRING}; rescored "
       f"from history under our rules). The GO-MCTS paper's tournament "
       f"played WITH passing+moon: METHOD-comparable, never number-comparable.")

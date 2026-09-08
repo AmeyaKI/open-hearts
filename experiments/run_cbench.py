@@ -56,7 +56,19 @@ N_INNER_DEFAULT = 20
 MAX_SIMULATIONS_DEFAULT = 1000
 
 
-def build_our_bot(rng, n_outer, n_inner):
+BOT_KINDS = ("honest", "expert-rollout")
+
+
+def build_our_bot(rng, n_outer, n_inner, bot_kind="honest"):
+    """`honest` = the frozen champion (C-bench 1 protocol, unfused).
+    `expert-rollout` = Phase 7C's ExpertRolloutSearchPlayer (train-side
+    experts as the opponent playout policy; unfused by construction)."""
+    if bot_kind == "expert-rollout":
+        from openhearts.players.expert_population import train_ids
+        from openhearts.search.expert_rollout import ExpertRolloutSearchPlayer
+        return ExpertRolloutSearchPlayer(Level.FULL, n_outer, n_inner, rng,
+                                         rollout_ids=train_ids())
+    assert bot_kind == "honest", bot_kind
     return HonestSearchPlayer(Level.FULL, n_outer, n_inner, rng,
                                sampler_respects_voids=True,
                                posterior_factory=None)
@@ -80,7 +92,7 @@ def build_ismcts_bot(seed, max_simulations):
 
 
 def play_one_game(deal_seed, our_seat_positions, n_outer, n_inner, max_simulations,
-                   config_id):
+                   config_id, bot_kind="honest"):
     """Play one full deal, with our bot occupying `our_seat_positions` (a set
     of seats) and the ISMCTS bot occupying the rest. Returns:
       (points_by_seat: list[4], our_decision_times: list[float],
@@ -95,9 +107,15 @@ def play_one_game(deal_seed, our_seat_positions, n_outer, n_inner, max_simulatio
     our_bots = {}
     ismcts_bots = {}
     for seat in range(4):
-        seed = hash((config_id, deal_seed, seat)) & 0xFFFFFFFF
+        if bot_kind == "honest":
+            seed = hash((config_id, deal_seed, seat)) & 0xFFFFFFFF   # C-bench 1 protocol, untouched (B0 repairs it)
+        else:
+            from openhearts.players.expert_population import derive_seed, DOMAIN_SEAT_ROTATION
+            seed = derive_seed(DOMAIN_SEAT_ROTATION, 7300, deal_seed, seat,
+                               0 if direction_of(config_id) == "ours-minority" else 1,
+                               config_id[1]) & 0xFFFFFFFF
         if seat in our_seat_positions:
-            our_bots[seat] = build_our_bot(np.random.default_rng(seed), n_outer, n_inner)
+            our_bots[seat] = build_our_bot(np.random.default_rng(seed), n_outer, n_inner, bot_kind)
         else:
             ismcts_bots[seat] = build_ismcts_bot(seed, max_simulations)
 
@@ -121,7 +139,11 @@ def play_one_game(deal_seed, our_seat_positions, n_outer, n_inner, max_simulatio
     return points, our_times, ismcts_times
 
 
-def play_one_deal_rotated(deal_seed, direction, n_outer, n_inner, max_simulations):
+def direction_of(config_id):
+    return config_id[0]
+
+
+def play_one_deal_rotated(deal_seed, direction, n_outer, n_inner, max_simulations, bot_kind="honest"):
     """4 rotations of one deal, minority bot rotated through every seat.
     Returns (our_avg_points, ismcts_avg_points, our_times, ismcts_times)."""
     our_total, ismcts_total = 0.0, 0.0
@@ -135,7 +157,7 @@ def play_one_deal_rotated(deal_seed, direction, n_outer, n_inner, max_simulation
             raise ValueError(direction)
         config_id = (direction, rotation)
         points, ot, it = play_one_game(deal_seed, our_seats, n_outer, n_inner,
-                                       max_simulations, config_id)
+                                       max_simulations, config_id, bot_kind)
         our_pts = sum(points[s] for s in our_seats) / len(our_seats)
         ismcts_seats = set(range(4)) - our_seats
         ismcts_pts = sum(points[s] for s in ismcts_seats) / len(ismcts_seats)
@@ -194,7 +216,8 @@ def _append_partial(partial_path, key, val):
         f.write(f"{key} {val}\n")
 
 
-def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_base):
+def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_base,
+        bot_kind="honest"):
     final_path, partial_path = _partial_paths(direction, n_outer, n_inner)
     # Loud guard: if the partial's header records a different config than
     # this run, refuse -- resuming across configs would mix two bots' deals.
@@ -213,7 +236,8 @@ def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_bas
     header = (
         f"# cbench direction={direction} n_deals={n_deals} workers={workers} "
         f"n_outer={n_outer} n_inner={n_inner} max_simulations={max_simulations} "
-        f"seed_base={seed_base} game={adapter.GAME_STRING}\n"
+        f"seed_base={seed_base} game={adapter.GAME_STRING}"
+        + (f" bot={bot_kind}" if bot_kind != "honest" else "") + "\n"
     )
     if not os.path.exists(partial_path):
         with open(partial_path, "w") as f:
@@ -236,7 +260,7 @@ def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_bas
     if workers <= 1:
         for s in to_run:
             our_pts, ismcts_pts, ot, it = play_one_deal_rotated(
-                s, direction, n_outer, n_inner, max_simulations)
+                s, direction, n_outer, n_inner, max_simulations, bot_kind)
             _append_partial(partial_path, f"our@{s}", our_pts)
             _append_partial(partial_path, f"ismcts@{s}", ismcts_pts)
             our_pts_all.append(our_pts)
@@ -247,7 +271,7 @@ def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_bas
     else:
         with cf.ProcessPoolExecutor(max_workers=workers) as pool:
             futs = {pool.submit(play_one_deal_rotated, s, direction, n_outer,
-                                n_inner, max_simulations): s for s in to_run}
+                                n_inner, max_simulations, bot_kind): s for s in to_run}
             for fut in cf.as_completed(futs):
                 s = futs[fut]
                 our_pts, ismcts_pts, ot, it = fut.result()
@@ -302,6 +326,9 @@ def main():
     ap.add_argument("--n-inner", type=int, default=N_INNER_DEFAULT)
     ap.add_argument("--max-simulations", type=int, default=MAX_SIMULATIONS_DEFAULT)
     ap.add_argument("--seed-base", type=int, default=SEED_BASE)
+    ap.add_argument("--bot", choices=list(BOT_KINDS), default="honest",
+                    help="7C: expert-rollout = train experts as the opponent playout "
+                         "policy (requires --partial-tag; stable derive_seed seat seeds)")
     ap.add_argument("--partial-tag", default="",
                     help="suffix for the partial/final filenames (e.g. "
                          "'_envcheck') so a default-config run never touches "
@@ -311,8 +338,10 @@ def main():
     global _PARTIAL_TAG
     _PARTIAL_TAG = args.partial_tag
 
+    if args.bot != "honest":
+        assert args.partial_tag, "--bot expert-rollout requires --partial-tag (banked files stay untouched)"
     run(args.deals, args.workers, args.direction, args.n_outer, args.n_inner,
-        args.max_simulations, args.seed_base)
+        args.max_simulations, args.seed_base, args.bot)
 
 
 if __name__ == "__main__":
