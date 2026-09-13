@@ -49,7 +49,11 @@ git apply --check "$REPO/experiments/xinxin_knoshooting.patch" || {
 git apply "$REPO/experiments/xinxin_knoshooting.patch"
 
 echo "== 4/6 build open_spiel with xinxin (Release) =="
-./install.sh || true   # deps; may brew-install python@3.14 as a side effect
+# The xinxin flag MUST be exported here too: open_spiel/scripts/install.sh clones
+# nathansttt/hearts into bots/xinxin/hearts only when it sees the flag ON. Without
+# it the later compile fails with 'Cannot find source file: hearts/Algorithm.cpp'
+# (this bit us twice on 2026-09-07/13).
+OPEN_SPIEL_BUILD_WITH_XINXIN=ON ./install.sh || true   # deps; may brew-install python@3.14 as a side effect
 "$VENV/bin/pip" install -r requirements.txt
 BUILD_TYPE=Release OPEN_SPIEL_BUILD_WITH_XINXIN=ON "$VENV/bin/pip" install .
 
