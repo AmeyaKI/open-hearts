@@ -544,6 +544,29 @@ The pre-registered expectation was that the plain reader would still lose 0.2 to
 
 **Limits.** One population family, generated from one catalogue. The exact-likelihood rows cap the candidate pool at 2,000 worlds, and the cap was reached on 30% to 48% of decisions, so those estimators remain support-limited in the middle game. 500 deals resolve about ±0.22, so a true edge of 0.1 would be invisible. The ISMCTS comparison row is paired on deals only.
 
+### Expert playouts: a null on every field (2026-09-17)
+
+**The question.** Phase 4 left one question open: is the search held back because the opponents it imagines play like beginners? Inside every imagined future, TallyHearts moves the other three seats with the beginner heuristic. This experiment replaces that heuristic with experts from the training pool (`experiments/run_ablation7c.py`). For example, when TallyHearts weighs leading a low spade with the queen still out, the imagined opponents now duck and unload the way a careful player would, instead of the way a beginner would.
+
+**Safeguards.** Only training-pool experts are used in the imagination, never the held-out ones. The expert policy drives the playouts only; it never touches the belief table or the world sampler, and a test enforces that. Every field is paired on 500 identical deals. Because expert playouts cost about eight times more per decision (0.22 s against 0.027 s), an **equal-time control** gives the unchanged bot the same wall-clock in extra worlds instead: 400×20 on the internal fields, and 80×20 on the ISMCTS field, where the harness runs the slower unfused path.
+
+| Field (500 paired deals) | Expert playouts − shipped bot | Equal-time control − shipped bot | Expert playouts − equal-time control |
+|---|---|---|---|
+| Held-out experts | +0.024 (−0.189, +0.237) | **−0.254 (−0.449, −0.064)** | **+0.278 (+0.061, +0.489)** |
+| Phase 5 personalities | +0.013 (−0.164, +0.190) | −0.046 (−0.214, +0.120) | +0.060 (−0.127, +0.248) |
+| Stock ISMCTS, 1,000 simulations | −0.019 (−0.294, +0.270) | −0.122 (−0.381, +0.135) | +0.103 (−0.169, +0.380) |
+| xinxin, 1 vs 3 | −0.211 (−0.462, +0.040) | not run | |
+
+**Against pre-registration.**
+
+1. *A gain of up to 0.4 points per hand on the expert field*: **falsified.** The expert field moved by +0.024, which is nothing, and no field shows a significant gain.
+2. *Transfer beyond the population the playout policy came from*: no field moved significantly, so there is no transfer result to report. The largest estimate is on xinxin, the opponent least like the experts, with an interval that touches zero. xinxin's random generator cannot be seeded, so this pairing against the August row also contains run-to-run noise; a same-session control is recorded in the next entry.
+3. *Does realism beat extra worlds at equal wall-clock?* No. Expert playouts beat the equal-time control on no field and lost to it significantly on the experts' own field (+0.278).
+
+**Verdict.** A null. The shipped bot is unchanged, and Phase 4's open question closes: at this variant and cost tier, the realism of the imagined opponents was not the binding constraint. The only significant gain anywhere in the panel belongs to the control, the plain bot with eight times as many worlds on the expert field (−0.254), which motivates the next entry.
+
+**Scope.** The speed comparison with xinxin quoted elsewhere applies to the shipped configuration only; the expert-playout variant costs about as much per decision as xinxin does.
+
 ## Known limitations
 
 Stated plainly, not hidden:
