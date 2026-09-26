@@ -240,6 +240,9 @@ def main():
     ap.add_argument("--probe", action="store_true",
                     help="3 deals at the requested workers; timing only")
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--tag", default="",
+                    help="suffix for the partial/final filenames (e.g. '_rerun7c') so a "
+                         "default-config run never resumes from or writes into the banked files")
     ap.add_argument("--selftest", action="store_true",
                     help="validate the hand-rolled Wilcoxon and exit")
     args = ap.parse_args()
@@ -262,7 +265,7 @@ def main():
     OPTS["bot"] = args.bot
 
     n_deals = 12 if args.probe else (2 if args.smoke else args.deals)
-    tag = "_probe" if args.probe else ("_smoke" if args.smoke else "")
+    tag = ("_probe" if args.probe else ("_smoke" if args.smoke else "")) + args.tag
     if args.probe:
         # Probe hygiene: offset seeds (never the match's own deals -- nothing
         # banked before the pre-registration is frozen) and 1-deal blocks so

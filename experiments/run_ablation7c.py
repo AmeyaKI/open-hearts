@@ -55,13 +55,13 @@ FIELDS = ("experts", "personalities")
 BUDGET_SECONDS = 2 * 3600
 
 
-def partial_path(field, probe=False):
-    tag = "_probe" if probe else ""
-    return os.path.join(RESULTS, f"ablation7c_{field}{tag}_partial.txt")
+def partial_path(field, probe=False, tag=""):
+    t = ("_probe" if probe else "") + tag
+    return os.path.join(RESULTS, f"ablation7c_{field}{t}_partial.txt")
 
 
-def report_path(field):
-    return os.path.join(RESULTS, f"ablation7c_{field}.txt")
+def report_path(field, tag=""):
+    return os.path.join(RESULTS, f"ablation7c_{field}{tag}.txt")
 
 
 # ------------------------------------------------------------------ fields
@@ -78,13 +78,13 @@ def _expert_field(n_deals):
     return trios, a7.expert_seat, a7.TRIO_BLOCK
 
 
-def build_bot(row, rng, eqtime_outer):
+def build_bot(row, rng, eqtime_outer, eqtime_inner=N_INNER):
     if row == "expert-rollout":
         return ExpertRolloutSearchPlayer(Level.FULL, 50, N_INNER, rng,
                                          rollout_ids=train_ids())
     if row == "honest-FULL-eqtime":
         assert eqtime_outer, "equal-time row needs --eqtime-outer from the probe"
-        return HonestSearchPlayer(Level.FULL, int(eqtime_outer), N_INNER, rng,
+        return HonestSearchPlayer(Level.FULL, int(eqtime_outer), int(eqtime_inner), rng,
                                   sampler_respects_voids=True,
                                   posterior_factory=None, fused=True)
     raise ValueError(row)
@@ -93,10 +93,11 @@ def build_bot(row, rng, eqtime_outer):
 def worker(name, block_idx, item_indices):
     cfg = json.loads(os.environ["ABL7C_CFG"])
     seed_base, field, eq = cfg["seed_base"], cfg["field"], cfg["eqtime_outer"]
+    eq_in = cfg.get("eqtime_inner", N_INNER)
     trios, seat_fn, tb = (_personality_field() if field == "personalities"
                           else _expert_field(cfg["n_deals"]))
     t0 = time.time()
-    bot = build_bot(name, np.random.default_rng([ROW_CONFIG_ID[name], int(block_idx)]), eq)
+    bot = build_bot(name, np.random.default_rng([ROW_CONFIG_ID[name], int(block_idx)]), eq, eq_in)
     values, spg = [], []
     for idx in item_indices:
         seed = seed_base + idx
@@ -122,22 +123,23 @@ def worker(name, block_idx, item_indices):
                          "rollout_playouts": int(getattr(bot, "rollout_playouts", 0))}}
 
 
-def header(field, rows, n_deals, workers, seed_base, eq, probe):
+def header(field, rows, n_deals, workers, seed_base, eq, probe, eq_in=N_INNER):
     lines = [f"# ablation7c {'PROBE ' if probe else ''}field={field} start {time.strftime('%Y-%m-%d %H:%M:%S')}",
-             f"# rows={rows} n_deals={n_deals} workers={workers} seed_base={seed_base} eqtime_outer={eq}",
+             f"# rows={rows} n_deals={n_deals} workers={workers} seed_base={seed_base} eqtime_outer={eq} eqtime_inner={eq_in}",
              "# expert-rollout: ExpertRolloutSearchPlayer Level.FULL 50x20, pool = train ids 1-200, "
              "unfused Python playouts, grouping OFF, one identity per opponent per outer world (CRN across candidates)",
-             "# honest-FULL-eqtime: HonestSearchPlayer Level.FULL <eqtime_outer>x20 fused (bitwise-gated)",
+             f"# honest-FULL-eqtime: HonestSearchPlayer Level.FULL <eqtime_outer>x{eq_in} fused (bitwise-gated)",
              "# variant no-pass/no-moon; paired on DEALS only with the banked incumbent rows"]
     text = "\n".join(lines)
     a7.assert_no_record_leak(text)
     return text
 
 
-def run_rows(field, rows, n_deals, workers, partial, seed_base, eq, probe=False):
+def run_rows(field, rows, n_deals, workers, partial, seed_base, eq, probe=False, eq_in=N_INNER):
     os.environ["ABL7C_CFG"] = json.dumps({"seed_base": seed_base, "field": field,
-                                          "eqtime_outer": eq, "n_deals": n_deals})
-    hdr = header(field, rows, n_deals, workers, seed_base, eq, probe)
+                                          "eqtime_outer": eq, "eqtime_inner": eq_in,
+                                          "n_deals": n_deals})
+    hdr = header(field, rows, n_deals, workers, seed_base, eq, probe, eq_in)
     print(hdr)
     with open(partial, "a") as f:
         f.write(hdr + "\n")
@@ -195,36 +197,44 @@ def main():
     ap.add_argument("--deals", type=int, default=500)
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--eqtime-outer", type=int, default=None)
+    ap.add_argument("--eqtime-inner", type=int, default=N_INNER,
+                    help="7D-V0: inner samples for the honest-FULL-eqtime row (default 20)")
+    ap.add_argument("--tag", default="",
+                    help="suffix for the partial/report filenames (e.g. '_200x20') so a "
+                         "7D-V0 candidate row never resumes from or writes into the 7C partials")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--probe", action="store_true")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--report", action="store_true")
     args = ap.parse_args()
     if args.smoke:
-        p = partial_path(args.field + "_smoke")
+        p = partial_path(args.field + "_smoke", tag=args.tag)
         if os.path.exists(p):
             os.remove(p)
         run_rows(args.field, ROW_NAMES, 2, 2, p, DEAL_SEED_BASE + PROBE_SEED_OFFSET + 1000,
-                 args.eqtime_outer or 100, probe=True)
+                 args.eqtime_outer or 100, probe=True, eq_in=args.eqtime_inner)
         report(args.field, 2, partial=p, pair_banked=False)
         return
     if args.probe:
         assert args.workers, "probe at the LAUNCH worker count: pass --workers"
-        p = partial_path(args.field, probe=True)
+        p = partial_path(args.field, probe=True, tag=args.tag)
         out = run_rows(args.field, args.rows, args.deals, args.workers, p,
-                       DEAL_SEED_BASE + PROBE_SEED_OFFSET, args.eqtime_outer, probe=True)
+                       DEAL_SEED_BASE + PROBE_SEED_OFFSET, args.eqtime_outer, probe=True,
+                       eq_in=args.eqtime_inner)
         for name, secs in out.items():
             print(f"  {name:20s} wall {secs:7.1f} s ({secs / (4 * args.deals):.2f} s/game contended) "
                   f"-> 500 deals ~{secs / args.deals * 500 / 60:.0f} min, 250 ~{secs / args.deals * 250 / 60:.0f} min")
         return
     if args.run:
         assert args.workers, "owner-approved worker count required: --workers"
-        run_rows(args.field, args.rows, args.deals, args.workers, partial_path(args.field),
-                 DEAL_SEED_BASE, args.eqtime_outer)
-        report(args.field, args.deals, out_path=report_path(args.field))
+        run_rows(args.field, args.rows, args.deals, args.workers, partial_path(args.field, tag=args.tag),
+                 DEAL_SEED_BASE, args.eqtime_outer, eq_in=args.eqtime_inner)
+        report(args.field, args.deals, partial=partial_path(args.field, tag=args.tag),
+               out_path=report_path(args.field, args.tag))
         return
     if args.report:
-        report(args.field, args.deals, out_path=report_path(args.field))
+        report(args.field, args.deals, partial=partial_path(args.field, tag=args.tag),
+               out_path=report_path(args.field, args.tag))
         return
     ap.print_help()
 
