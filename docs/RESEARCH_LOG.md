@@ -590,6 +590,29 @@ Head to head on the ISMCTS field, the two candidates are tied: +0.024 (−0.252,
 
 **What the data do say.** All eight paired comparisons favour the larger search, by 0.10 to 0.20 points per hand, with one significant and seven not. A search four times larger shows a consistent tendency of about 0.15 points per hand that did not reach significance on the deciding field at 500 deals. That is what a real effect of that size looks like at this sample size, and it is also what no effect looks like about one time in eight. The rule was written in advance to prevent choosing a winner after seeing the results, so the null stands. A future test with about 1,000 deals on the deciding field could resolve it.
 
+### Replayable benchmark seeds and the benchmark registry (2026-09-26 to 2026-09-27)
+
+**The problem.** An audit of the external-benchmark harnesses found that they seeded each seat's random generator from Python's built-in `hash()`, which is salted differently in every process. The banked rows were honest samples, but two re-runs of the same match drew different dice, so no single game could be replayed.
+
+**The repair.** Seat seeds now come from a documented integer mixer (`openhearts.eval.seeds.bench_seat_seed`, built on SplitMix64) with pinned outputs and no dependence on `hash()`. Result files written this way carry the header token `seeds=stable-v1`, and the harnesses refuse to resume an older partial file under the new scheme, so the two kinds of row can never be mixed.
+
+**Determinism check.** 20 deals × 4 rotations of the ISMCTS match, run in two independent processes: every per-deal line is identical.
+
+**Replications on the original deals** (same bot, new dice; the pre-registered expectation was a difference of 0 ± 0.3, not significant):
+
+| Match (500 deals, one TallyHearts seat against three opponents) | Replication | Banked row | Replication − banked |
+|---|---|---|---|
+| Stock ISMCTS, 1,000 simulations | 4.901 (ISMCTS seats 7.033) | 4.769 | +0.132 (−0.139, +0.405) |
+| xinxin | 5.978 [5.746, 6.213] (xinxin 6.674) | 5.894 | +0.085 (−0.165, +0.327) |
+
+Both expectations were met. In the xinxin replication the margin is −0.696 [−1.005, −0.383].
+
+**An error bar for single rows.** Three runs of the shipped bot against xinxin on the same 500 deals now read 5.894 (August), 5.844 (2026-09-25) and 5.978 (2026-09-27). That spread of about 0.13 is the harness's run-to-run noise and should be quoted alongside any single row of this kind.
+
+**What remains unreplayable.** xinxin's own random generators cannot be controlled through OpenSpiel's wrapper, so xinxin games are reproducible on TallyHearts's seats only. ISMCTS games are fully replayable from 2026-09-26 onward. Rows banked before that date remain valid statistical samples and are not replayable game for game.
+
+**The benchmark registry.** [`docs/BENCHMARK_REGISTRY.md`](BENCHMARK_REGISTRY.md) was introduced alongside this work. It lists every opponent a claim rests on, with its source, license, settings, seeds, evidence class and caveats, and fixes one canonical wording per result. No external claim is made unless its opponent has an entry there.
+
 ## Known limitations
 
 Stated plainly, not hidden:
