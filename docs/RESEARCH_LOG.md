@@ -567,6 +567,29 @@ The pre-registered expectation was that the plain reader would still lose 0.2 to
 
 **Scope.** The speed comparison with xinxin quoted elsewhere applies to the shipped configuration only; the expert-playout variant costs about as much per decision as xinxin does.
 
+### A larger search: a consistent tendency, not adopted (2026-09-25 to 2026-09-26)
+
+**First, the xinxin control.** The plain shipped bot was re-run against xinxin on the same 500 deals, in the same session and build as the expert-playout row: 5.844 [5.623, 6.059] against xinxin's 6.719, a margin of −0.875 [−1.169, −0.588]. The re-run differs from the August row by −0.050 (−0.304, +0.197), so xinxin's run-to-run noise is small. Against this same-session control, expert playouts score −0.162 (−0.430, +0.120). The xinxin field of the previous entry is therefore final: a null, with a direction that is suggestive and unconfirmed at 500 deals.
+
+**The question.** The 50×20 search size was chosen when a decision cost about 0.2 seconds. The fused kernel made decisions roughly five times cheaper, and an operating-point sweep in late August (250 deals) suggested a larger search scores better. This test asks whether to ship a larger one.
+
+**Candidates and rule, frozen before the run.** Two candidates came from the sweep: 200×20 (0.105 s per decision) and 100×50 (0.115 s), against the shipped 50×20 at 0.027 s. A candidate is adopted only if its improvement on the ISMCTS field, the deciding field, has a confidence interval that excludes zero, and it is not significantly worse on any other field. Adoption would then be followed by a fresh exploitability measurement.
+
+| Field (500 paired deals) | 200×20 − shipped 50×20 | 100×50 − shipped 50×20 |
+|---|---|---|
+| Stock ISMCTS, 1,000 simulations (deciding field) | −0.146 (−0.415, +0.122) | −0.171 (−0.449, +0.106) |
+| Beginner heuristic | **−0.198 (−0.350, −0.043)** | −0.106 (−0.271, +0.061) |
+| Held-out experts | −0.131 (−0.322, +0.060) | −0.096 (−0.299, +0.113) |
+| Phase 5 personalities | −0.120 (−0.282, +0.045) | −0.143 (−0.314, +0.029) |
+
+Head to head on the ISMCTS field, the two candidates are tied: +0.024 (−0.252, +0.308).
+
+**Verdict.** The deciding interval includes zero for both candidates, so under the frozen rule **neither is adopted**. The shipped bot stays at 50×20 and the exploitability step did not run.
+
+**Against pre-registration.** The August sweep's most promising figure, −0.464 for 100×50 on the ISMCTS field at 250 deals, did not hold: against the banked row it was −0.294 at 250 deals and regressed to −0.171 at 500, so the expectation that it would exclude zero is **falsified**. The heuristic-field gain for 200×20 tightened and now excludes zero, as expected. The expert-field gains scale down from the 400-world result of the previous entry, as expected, and are not significant. The personality field was expected to show no change and came out slightly better than that (−0.120 and −0.143, with intervals touching zero).
+
+**What the data do say.** All eight paired comparisons favour the larger search, by 0.10 to 0.20 points per hand, with one significant and seven not. A search four times larger shows a consistent tendency of about 0.15 points per hand that did not reach significance on the deciding field at 500 deals. That is what a real effect of that size looks like at this sample size, and it is also what no effect looks like about one time in eight. The rule was written in advance to prevent choosing a winner after seeing the results, so the null stands. A future test with about 1,000 deals on the deciding field could resolve it.
+
 ## Known limitations
 
 Stated plainly, not hidden:
