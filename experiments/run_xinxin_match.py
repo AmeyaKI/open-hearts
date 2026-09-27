@@ -129,8 +129,14 @@ def play_one_game(deal_seed, our_seats, config_id):
     our_bots, xinxin_bots = {}, {}
     for seat in range(4):
         if seat in our_seats:
-            seed = SEAT_SEED_BASE + (hash((config_id, deal_seed, seat))
-                                     & 0xFFFFFF)
+            # B0 (2026-09-26): stable seat seed (openhearts.eval.seeds) in place
+            # of the per-process-salted hash() the banked rows were drawn with.
+            # xinxin's own generators stay uncontrollable (no wrapper knob).
+            from openhearts.eval.seeds import HARNESS_XINXIN, bench_seat_seed
+            tier, label = config_id
+            seating_int = int(str(label)[1:])        # "r2" -> 2, "m05" -> 5
+            seed = SEAT_SEED_BASE + (bench_seat_seed(HARNESS_XINXIN, int(tier), seating_int,
+                                                     deal_seed, seat) & 0xFFFFFF)
             if OPTS.get("bot") == "expert-rollout":
                 from openhearts.players.expert_population import train_ids
                 from openhearts.search.expert_rollout import ExpertRolloutSearchPlayer
@@ -279,6 +285,23 @@ def main():
     partial = os.path.join(RESULTS, f"xinxin_{cfgname}{tag}_partial.txt")
     out_path = os.path.join(RESULTS, f"xinxin_{cfgname}{tag}.txt")
 
+    # B0 guard: refuse to resume a partial banked before the seed repair (its
+    # first line is a block, not the seeds token); fresh partials get the token.
+    from openhearts.eval.seeds import SEEDS_TOKEN
+    if (args.smoke or args.probe) and os.path.exists(partial):
+        os.remove(partial)          # smokes/probes are throwaway: never resumed
+    if os.path.exists(partial):
+        with open(partial) as f:
+            first = f.readline()
+        if SEEDS_TOKEN not in first:
+            raise AssertionError(
+                f"{partial} was banked BEFORE the B0 seed repair (no '{SEEDS_TOKEN}' "
+                f"header): a stable-seed run must not append to it. Use --tag.")
+    else:
+        os.makedirs(RESULTS, exist_ok=True)
+        with open(partial, "w") as f:
+            f.write(f"# {SEEDS_TOKEN} harness=xinxin cfg={cfgname}\n")
+
     os.makedirs(RESULTS, exist_ok=True)
     os.environ["XINXIN_MATCH_CFG"] = json.dumps(
         {"opts": OPTS, "seed_base": DEAL_SEED_BASE,
@@ -321,6 +344,8 @@ def main():
     a(f"variant: no-pass / no-moon (game {adapter.GAME_STRING}; rescored "
       f"from history under our rules). The GO-MCTS paper's tournament "
       f"played WITH passing+moon: METHOD-comparable, never number-comparable.")
+    a("seat seeds: stable derive_seed (B0, openhearts.eval.seeds, seeds=stable-v1) on our seats; "
+      "xinxin RNG: uncontrollable through OpenSpiel's wrapper (games not replayable)")
     a(f"deals: seeds {DEAL_SEED_BASE}..{DEAL_SEED_BASE + n_deals - 1} x "
       f"{'14 seatings' if args.tier == 2 else '4 rotations'} = "
       f"{n_deals * (14 if args.tier == 2 else 4)} games  |  "

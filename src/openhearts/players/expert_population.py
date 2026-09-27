@@ -47,6 +47,7 @@ DOMAIN_DEALS = 2
 DOMAIN_SEAT_ROTATION = 3
 DOMAIN_POLICY_TIES = 4
 DOMAIN_SEARCH = 5
+DOMAIN_BENCH_SEAT = 6        # B0: benchmark-harness seat seeds (openhearts.eval.seeds)
 
 MASTER_SEED_EXPERT_V1 = 7_070_707   # distinct from personality masters 314159 / 606060
 

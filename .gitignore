@@ -13,3 +13,4 @@ TODO
 # C++ backend (Track C): build tree and compiled extension modules
 cpp/build/
 *.so
+!docs/BENCHMARK_REGISTRY.md

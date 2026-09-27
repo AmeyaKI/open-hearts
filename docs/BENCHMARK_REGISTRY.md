@@ -1,0 +1,52 @@
+# Benchmark registry (B0)
+
+Every external or synthetic opponent that any open-hearts claim rests on, in one table, with
+exactly what it is and how far its numbers can be trusted. Maintained since 2026-09-26 (ROADMAP
+post-Phase-7 program, item B0). **Rule: no external claim leaves the repo unless its opponent has a
+row here, and the claim uses that row's canonical wording.** Gaps are written as gaps.
+
+Variant for every row unless stated: **no-pass / no-moon Hearts** (`hearts(pass_cards=False,
+qs_breaks_hearts=False)` in OpenSpiel terms; standard per-trick scoring, Q♠ = 13, 2♣ leads trick 1,
+no shoot-the-moon rescoring). Points are per seat-hand, lower is better; a 4-seat hand sums to 26.
+
+## Hardware and environments (all measurements)
+
+| | |
+|---|---|
+| Machine | one Apple M5 Max (18 cores, 128 GB), macOS 26.6.2 — the only valid bench: x86 fails the project's bitwise tripwires by 1 ULP (ci-probe branch) |
+| Project venv | Python 3.12.4, numpy 2.4.6, numba 0.66.0 (fused kernel bitwise-gated against the Python path) |
+| pyspiel venv (C-bench, xinxin) | Python 3.12.12, numpy 2.5.3, open_spiel 2.0.2 built from source (google-deepmind/open_spiel @ 4840189, 2026-08-31) with `OPEN_SPIEL_BUILD_WITH_XINXIN=ON`; recipe `scripts/build_xinxin.sh`; rebuilt per session (scratch venvs do not persist) |
+| Seeds | deals: `seed_base + i` (100000+ for banked rows; probes/smokes ≥ 900000). Our seat rngs: since B0, `openhearts.eval.seeds.bench_seat_seed` (SplitMix64 `derive_seed`, domain 6, harness id 1 = C-bench, 2 = xinxin; header token `seeds=stable-v1`). **Rows banked before 2026-09-26 used Python's per-process-salted `hash()` for seat seeds: honest samples, not game-replayable.** Internal harnesses (ablation5/7/7c, exploit) use `numpy.default_rng([config_id, block])` or `derive_seed` — stable. |
+| Statistics | paired per-deal differences on identical deal seeds, 4 rotations (or 14 seatings), percentile bootstrap 95% CI over deals (`openhearts.eval.stats.bootstrap_ci`); Wilcoxon signed-rank reported where the literature uses it. Deal pairing removes deal luck; it does NOT pair search dice across bots (each bot has its own seat stream). |
+
+## Our own bot versions
+
+| Version | Settings | Cost (s/decision, 12-worker contended unless noted) | Status |
+|---|---|---|---|
+| **honest-FULL 50×20 fused** (shipped) | exact belief table (Level.FULL), 50 outer worlds × 20 inner re-determinizations, fused kernel (bitwise-gated), grouping off, no posterior reading | 0.026–0.027 | shipped since Phase 6; exploitability +0.198 (+0.068, +0.327) champion-side, minor leak |
+| honest-FULL unfused | same, Python path | 0.145 (C-bench 1 protocol ran it unfused) | bitwise identical to fused; historical |
+| 200×20 / 100×50 fused | 7D-V0 candidates | 0.105 / 0.115 (heuristic field) | **not adopted** (2026-09-26): ~0.15 pts/hand better on every field, significant only vs heuristics |
+| expert-rollout 50×20 | train experts as opponent playout policy (7C) | 0.22–0.25 | retired: null on all four fields, loses to equal-time control |
+| ISMCTS-in-our-harness | — | — | none; we never ship a tree searcher |
+
+## Opponents
+
+| Opponent | What it is, exactly | Source / commit / license | Settings used | Seed control · replay | Evidence class | Our measured result (canonical wording) | Compositions · adapter tests |
+|---|---|---|---|---|---|---|---|
+| **Phase-1 heuristic** | hand-written beginner rules (`src/openhearts/players/heuristic.py`), deterministic given the view | this repo | none | deterministic · replayable | our own gym; no external calibration | honest-FULL 3.253 pts/hand vs 3 heuristics (Phase 2; sweep 50×20 = 3.260 on 500 deals, 2026-09-26) | 1v3 rotated; `tests/test_heuristic*.py` |
+| **Phase-5/6 personalities** | parameterised heuristic variants, populations v1 (master 314159, 200/50) and v2 (master 606060, `personality.py`); held-out trios `run_ablation5.py` (`TRIO_SEED=[314159, 6060]`) | this repo | 20 held-out trios × deals 100000+ | `numpy.default_rng` streams · replayable | our own gym — **soft** (Phase 6: a stock ISMCTS bot is harder) | honest-FULL 2.345 vs held-out trios (ablation5, 500 deals) | 1v3 rotated; `tests/test_personality*.py` |
+| **Expert population v1** | 250 rulebook experts from `EXPERT_RULEBOOK_DRAFT.md` (32-field records, SplitMix from master 7,070,707; ids 1–200 train / 201–250 held-out; owner never sees held-out parameters) | this repo (`expert_population.py`, `expert.py`), corpus pin `3e73a45e…ee80` | 20 held-out trios (7B blocks), deals 100000+ | `derive_seed` · replayable | our own gym — **ISMCTS-hard** (4.761 ≈ C-bench 4.769 on 500 deals) | honest-FULL **4.761 (4.553, 4.972)** vs held-out experts (7B, 500 deals) | 1v3 rotated; `tests/test_expert.py` (56), `tests/test_expert_population.py` (15) |
+| **OpenSpiel generic ISMCTS** | `open_spiel.python.algorithms.ismcts.ISMCTSBot`, `uct_c=2.0`, `max_simulations=1000`, `RandomRolloutEvaluator(n_rollouts=1)`; stock, untuned, no domain knowledge — **a generic baseline, never "frontier" or "a model"** | google-deepmind/open_spiel @ 4840189 (Apache-2.0) via `experiments/run_cbench.py`; adapter `experiments/cbench_adapter` (see `run_cbench.py` imports) | 1,000 sims; also 3,000 / 10,000 (A4 curve) | fully seeded (`np.random.RandomState(seed)`, same seat seed as ours) · **game-replayable since B0** (run 1: two 12-worker processes byte-identical on 20 deals) | our own measurement; OpenSpiel publishes no Hearts strength figures | Canonical: *"On 1,000 matched no-pass/no-moon deals, we beat OpenSpiel's stock, untuned generic ISMCTS baseline configured with 1,000 simulations and one random rollout (4.70 vs 7.10 points/hand; lower is better)."* Majority: 5.77 vs 8.70. Compute-robust: ISMCTS@1k/3k/10k → ours 5.02/5.18/5.19 n.s. (A4). **B0 stable-seed replication (500 deals, 2026-09-26): PENDING RUN 2.** | ours-minority (1v3), ours-majority (3v1), rotated; `tests/test_cbench.py` |
+| **xinxin** (Sturtevant) | the field's reference Hearts program (UCT-based, 25 years), via OpenSpiel's `bots/xinxin` wrapper; plays no-pass natively; no-moon via its **native `kNoShooting` flag** enabled by `experiments/xinxin_knoshooting.patch` (20 lines; rules config, not a strength change; disclosed in every header) | nathansttt/hearts @ 6ba1154 (2020-08-14) **as cloned at HEAD by OpenSpiel's `install.sh` — not pinned by us until B0 recorded it**; GPL-3.0 (LICENSE in the checkout); wrapper Apache-2.0 | paper config: 2,000 runs, 50 worlds, C = 0.4, threads off; Release build | **uncontrollable**: the wrapper exposes no seed knob; our seats stable since B0 · games NOT replayable; between-run noise measured **−0.050 (−0.304, +0.197)** on 500 deals (2026-09-25 rerun vs banked) | published program (Sturtevant; GO-MCTS paper reports beating it by 1.74 pts/hand WITH passing+moon — method-comparable only, never number-comparable); our measurement is independent | Canonical: *"On 1,000 randomly dealt no-pass/no-moon Hearts hands across all 14 mixed seating configurations, our 50×20 fused bot beat xinxin at its published 2,000-run/50-world/C=0.4 configuration by 0.776 points per seat-hand (paired bootstrap 95% CI [0.642, 0.910] in our favor)"* — never "we beat xinxin at Hearts". Tier 1: minority −0.809 [−1.100, −0.509], majority −0.555 [−0.879, −0.231]. Speed: ours 0.027 vs xinxin ~0.25 s/decision → **"~9× faster"** (shipped bot only). **B0 stable-seed replication (tier 1 minority, 500 deals, 2026-09-26): PENDING RUN 3.** | tier 1: 1v3 and 3v1 rotated; tier 2: 14-way duplicate (4×1v3, 6×2v2, 4×3v1); `run_xinxin_match.py --selftest` (Wilcoxon), rescore identity asserted every game (seats sum to 26), zero tripwires in 18,000+ games |
+| **Perilune** (JAkoliver/hearts_simulator) | independent neural Hearts project: learned 3×52 belief head + belief-weighted flat PIMC with net rollouts; full rules incl. passing and moon, with a "hold" pass direction | github.com/JAkoliver/hearts_simulator; `models-v1` release (TorchScript trace; md5/sha256 manifests in the release); **license: NOT VERIFIED — gap** | planned: Tier 0 belief audit, Tier 1 raw net as opponent (legality-masked argmax), Tier 2 their search player | their net is deterministic given inputs; their search: unknown until built | **self-reported only**: all their results are vs their own lineage; never externally calibrated or ablated | none yet (ROADMAP B6) | planned 1v3 rotated; adapter tests required before any run |
+| **GO-MCTS** (paper) | full-rules Hearts agent, 25.6 s/move | no code or checkpoint available | — | — | published numbers, not reproducible by us | method-comparable only | — |
+| **Berns Deep-CFR**, **Valet/CardStock** | see ROADMAP B2/B3 | not acquired | — | — | self-reported / framework | none | — |
+
+## Reproducibility status by banked row
+
+| Banked row | Seat seeds | Replayable? | Note |
+|---|---|---|---|
+| C-bench ours-minority / ours-majority 1,000 deals (2026-08-2x) | salted `hash()` | no (statistically valid sample) | A3 env-check on a rebuilt venv: +0.170 (−0.233, +0.582) n.s. on 250 deals; B0 replication row supersedes as the canonical reference |
+| xinxin tier 1 / tier 2 (2026-08-29) | salted `hash()` on our seats; xinxin unseeded | no | 2026-09-25 same-deal rerun: −0.050 (−0.304, +0.197) — run noise small |
+| ablation5 / ablation7 / ablation7c / exploit rows | `numpy.default_rng([config, block])` / `derive_seed` | yes (block-level) | fused kernel bitwise vs Python path; NO_JIT identical |
+| every row since 2026-09-26 | `seeds=stable-v1` | C-bench: yes; xinxin: our seats only | header token enforced by both harnesses |

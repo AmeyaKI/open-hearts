@@ -108,7 +108,13 @@ def play_one_game(deal_seed, our_seat_positions, n_outer, n_inner, max_simulatio
     ismcts_bots = {}
     for seat in range(4):
         if bot_kind == "honest":
-            seed = hash((config_id, deal_seed, seat)) & 0xFFFFFFFF   # C-bench 1 protocol, untouched (B0 repairs it)
+            # B0 (2026-09-26): stable seat seed (openhearts.eval.seeds) in place of
+            # the per-process-salted hash() the banked rows were drawn with.
+            # The same seed also seeds the ISMCTS bot -> a C-bench game is replayable.
+            from openhearts.eval.seeds import HARNESS_CBENCH, bench_seat_seed
+            seed = bench_seat_seed(HARNESS_CBENCH,
+                                   0 if direction_of(config_id) == "ours-minority" else 1,
+                                   config_id[1], deal_seed, seat)
         else:
             from openhearts.players.expert_population import derive_seed, DOMAIN_SEAT_ROTATION
             seed = derive_seed(DOMAIN_SEAT_ROTATION, 7300, deal_seed, seat,
@@ -230,6 +236,15 @@ def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_bas
                 f"{partial_path} header does not match this run's config "
                 f"({want}): refusing to resume across configs. Header: "
                 f"{first.strip()}")
+        # B0 guard: an honest run under stable seeds may only resume a partial
+        # that was written under stable seeds. The banked pre-B0 files carry no
+        # seeds token, so this refuses them -- use a fresh --partial-tag.
+        from openhearts.eval.seeds import SEEDS_TOKEN
+        if bot_kind == "honest" and first.startswith("#") and SEEDS_TOKEN not in first:
+            raise AssertionError(
+                f"{partial_path} was banked BEFORE the B0 seed repair (header lacks "
+                f"'{SEEDS_TOKEN}'): a stable-seed run must not append to it. "
+                f"Use a new --partial-tag. Header: {first.strip()}")
     banked = _load_partial(partial_path)
     deal_seeds = [seed_base + i for i in range(n_deals)]
 
@@ -237,7 +252,8 @@ def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_bas
         f"# cbench direction={direction} n_deals={n_deals} workers={workers} "
         f"n_outer={n_outer} n_inner={n_inner} max_simulations={max_simulations} "
         f"seed_base={seed_base} game={adapter.GAME_STRING}"
-        + (f" bot={bot_kind}" if bot_kind != "honest" else "") + "\n"
+        + (f" bot={bot_kind}" if bot_kind != "honest" else "")
+        + (" seeds=stable-v1" if bot_kind == "honest" else "") + "\n"
     )
     if not os.path.exists(partial_path):
         with open(partial_path, "w") as f:
