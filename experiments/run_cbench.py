@@ -31,6 +31,7 @@ Output: results/cbench_<direction>.txt (final) and
 results/cbench_<direction>_partial.txt (checkpoint, resumable).
 """
 import argparse
+import json
 import concurrent.futures as cf
 import os
 import statistics
@@ -74,19 +75,58 @@ def build_our_bot(rng, n_outer, n_inner, bot_kind="honest"):
                                posterior_factory=None)
 
 
+# ---- B1: the ISMCTS rung (ROADMAP post-Phase-7 B1; PHASE7_PLAN.md TASK B1) ----
+# The stock rung is OpenSpiel's ISMCTS exactly as C-bench 1 ran it. Other rungs
+# plug our heuristic into OpenSpiel's evaluator hooks and/or retune its knobs.
+# The config travels to spawned workers through the environment (JSON), like
+# the other harnesses; at the defaults the header and every game are unchanged.
+ISMCTS_RUNGS = ("stock", "tuned", "heur-rollout", "heur-prior")
+ISMCTS_DEFAULTS = {"rung": "stock", "uct_c": 2.0, "world_samples": -1,
+                   "final_policy": "MAX_VISIT_COUNT", "child_selection": "UCT",
+                   "prior_eps": None}
+_ISMCTS_ENV = "CBENCH_ISMCTS_CFG"
+
+
+def ismcts_cfg():
+    cfg = dict(ISMCTS_DEFAULTS)
+    raw = os.environ.get(_ISMCTS_ENV)
+    if raw:
+        cfg.update(json.loads(raw))
+    return cfg
+
+
+def ismcts_cfg_tag(cfg=None):
+    """"" at the stock defaults (banked headers stay byte-identical), else a
+    header token naming every knob -- the resume guard compares it."""
+    cfg = cfg or ismcts_cfg()
+    if all(cfg[k] == v for k, v in ISMCTS_DEFAULTS.items()):
+        return ""
+    return (f" ismcts={cfg['rung']}:c={cfg['uct_c']}:ws={cfg['world_samples']}"
+            f":fp={cfg['final_policy']}:sel={cfg['child_selection']}:eps={cfg['prior_eps']}")
+
+
 def build_ismcts_bot(seed, max_simulations):
     import pyspiel
     from open_spiel.python.algorithms import ismcts, evaluate_bots  # noqa: F401
     from open_spiel.python.algorithms.mcts import RandomRolloutEvaluator
 
+    cfg = ismcts_cfg()
     game = pyspiel.load_game(adapter.GAME_STRING)
-    evaluator = RandomRolloutEvaluator(n_rollouts=1, random_state=np.random.RandomState(seed))
+    if cfg["rung"] in ("stock", "tuned"):
+        evaluator = RandomRolloutEvaluator(n_rollouts=1, random_state=np.random.RandomState(seed))
+    else:
+        from cbench.evaluators import HeuristicRolloutEvaluator
+        evaluator = HeuristicRolloutEvaluator(
+            prior_eps=cfg["prior_eps"] if cfg["rung"] == "heur-prior" else None)
     bot = ismcts.ISMCTSBot(
         game=game,
         evaluator=evaluator,
-        uct_c=2.0,
+        uct_c=float(cfg["uct_c"]),
         max_simulations=max_simulations,
+        max_world_samples=int(cfg["world_samples"]),
         random_state=np.random.RandomState(seed),
+        final_policy_type=ismcts.ISMCTSFinalPolicyType[cfg["final_policy"]],
+        child_selection_policy=ismcts.ChildSelectionPolicy[cfg["child_selection"]],
     )
     return bot
 
@@ -142,7 +182,14 @@ def play_one_game(deal_seed, our_seat_positions, n_outer, n_inner, max_simulatio
 
     points = adapter.rescore(mirror)
     assert sum(points) == 26
-    return points, our_times, ismcts_times
+    diag = {"n_evaluate": 0, "n_inconsistent": 0, "n_illegal_replays": 0}   # B1 report-only
+    for b in ismcts_bots.values():
+        ev = getattr(b, "_evaluator", None)
+        if ev is not None and hasattr(ev, "n_inconsistent_worlds"):
+            diag["n_evaluate"] += ev.n_evaluate
+            diag["n_inconsistent"] += ev.n_inconsistent_worlds
+            diag["n_illegal_replays"] += ev.n_illegal_replays
+    return points, our_times, ismcts_times, diag
 
 
 def direction_of(config_id):
@@ -154,6 +201,7 @@ def play_one_deal_rotated(deal_seed, direction, n_outer, n_inner, max_simulation
     Returns (our_avg_points, ismcts_avg_points, our_times, ismcts_times)."""
     our_total, ismcts_total = 0.0, 0.0
     our_times, ismcts_times = [], []
+    diag = {"n_evaluate": 0, "n_inconsistent": 0, "n_illegal_replays": 0}
     for rotation in range(4):
         if direction == "ours-minority":
             our_seats = {rotation}
@@ -162,8 +210,10 @@ def play_one_deal_rotated(deal_seed, direction, n_outer, n_inner, max_simulation
         else:
             raise ValueError(direction)
         config_id = (direction, rotation)
-        points, ot, it = play_one_game(deal_seed, our_seats, n_outer, n_inner,
-                                       max_simulations, config_id, bot_kind)
+        points, ot, it, dg = play_one_game(deal_seed, our_seats, n_outer, n_inner,
+                                           max_simulations, config_id, bot_kind)
+        for k in diag:
+            diag[k] += dg[k]
         our_pts = sum(points[s] for s in our_seats) / len(our_seats)
         ismcts_seats = set(range(4)) - our_seats
         ismcts_pts = sum(points[s] for s in ismcts_seats) / len(ismcts_seats)
@@ -171,7 +221,7 @@ def play_one_deal_rotated(deal_seed, direction, n_outer, n_inner, max_simulation
         ismcts_total += ismcts_pts
         our_times.extend(ot)
         ismcts_times.extend(it)
-    return our_total / 4.0, ismcts_total / 4.0, our_times, ismcts_times
+    return our_total / 4.0, ismcts_total / 4.0, our_times, ismcts_times, diag
 
 
 def _partial_paths(direction, n_outer=N_OUTER_DEFAULT, n_inner=N_INNER_DEFAULT):
@@ -231,6 +281,11 @@ def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_bas
         with open(partial_path) as f:
             first = f.readline()
         want = f"n_outer={n_outer} n_inner={n_inner}"
+        tag = ismcts_cfg_tag()
+        if first.startswith("#") and ((" ismcts=" in first) != bool(tag) or (tag and tag.strip() not in first)):
+            raise AssertionError(
+                f"{partial_path} was banked under a different ISMCTS rung/knobs than this run "
+                f"({tag.strip() or 'stock defaults'}): refusing to resume. Header: {first.strip()}")
         if first.startswith("#") and want not in first:
             raise AssertionError(
                 f"{partial_path} header does not match this run's config "
@@ -253,7 +308,8 @@ def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_bas
         f"n_outer={n_outer} n_inner={n_inner} max_simulations={max_simulations} "
         f"seed_base={seed_base} game={adapter.GAME_STRING}"
         + (f" bot={bot_kind}" if bot_kind != "honest" else "")
-        + (" seeds=stable-v1" if bot_kind == "honest" else "") + "\n"
+        + (" seeds=stable-v1" if bot_kind == "honest" else "")
+        + ismcts_cfg_tag() + "\n"
     )
     if not os.path.exists(partial_path):
         with open(partial_path, "w") as f:
@@ -265,6 +321,7 @@ def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_bas
 
     our_times_all, ismcts_times_all = [], []
     our_pts_all, ismcts_pts_all = [], []
+    diag_all = {"n_evaluate": 0, "n_inconsistent": 0, "n_illegal_replays": 0}   # B1 report-only diagnostic
 
     # Pre-existing banked results (for the final report)
     for s in deal_seeds:
@@ -275,8 +332,10 @@ def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_bas
     t_start = time.perf_counter()
     if workers <= 1:
         for s in to_run:
-            our_pts, ismcts_pts, ot, it = play_one_deal_rotated(
+            our_pts, ismcts_pts, ot, it, dg = play_one_deal_rotated(
                 s, direction, n_outer, n_inner, max_simulations, bot_kind)
+            for k in diag_all:
+                diag_all[k] += dg[k]
             _append_partial(partial_path, f"our@{s}", our_pts)
             _append_partial(partial_path, f"ismcts@{s}", ismcts_pts)
             our_pts_all.append(our_pts)
@@ -290,7 +349,9 @@ def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_bas
                                 n_inner, max_simulations, bot_kind): s for s in to_run}
             for fut in cf.as_completed(futs):
                 s = futs[fut]
-                our_pts, ismcts_pts, ot, it = fut.result()
+                our_pts, ismcts_pts, ot, it, dg = fut.result()
+                for k in diag_all:
+                    diag_all[k] += dg[k]
                 _append_partial(partial_path, f"our@{s}", our_pts)
                 _append_partial(partial_path, f"ismcts@{s}", ismcts_pts)
                 our_pts_all.append(our_pts)
@@ -326,6 +387,11 @@ def run(n_deals, workers, direction, n_outer, n_inner, max_simulations, seed_bas
     lines.append(f"ismcts_decision_time_s mean={ismcts_summary.get('mean', float('nan')):.5f} "
                  f"median={ismcts_summary.get('median', float('nan')):.5f} "
                  f"p95={ismcts_summary.get('p95', float('nan')):.5f} n={ismcts_summary.get('n', 0)}\n")
+    if diag_all["n_evaluate"]:
+        lines.append(f"ismcts_worlds_inconsistent_with_history={diag_all['n_inconsistent']} of "
+                     f"{diag_all['n_evaluate']} evaluate calls "
+                     f"({100.0 * diag_all['n_inconsistent'] / diag_all['n_evaluate']:.1f}%), "
+                     f"illegal_recorded_plays={diag_all['n_illegal_replays']}  [B1 report-only diagnostic]\n")
     with open(final_path, "w") as f:
         f.writelines(lines)
     print("".join(lines))
@@ -345,6 +411,18 @@ def main():
     ap.add_argument("--bot", choices=list(BOT_KINDS), default="honest",
                     help="7C: expert-rollout = train experts as the opponent playout "
                          "policy (requires --partial-tag; stable derive_seed seat seeds)")
+    ap.add_argument("--rung", choices=list(ISMCTS_RUNGS), default="stock",
+                    help="B1 ISMCTS rung: stock (C-bench 1), tuned (random rollout, retuned knobs), "
+                         "heur-rollout (our heuristic as the rollout), heur-prior (+ heuristic prior, PUCT)")
+    ap.add_argument("--uct-c", type=float, default=ISMCTS_DEFAULTS["uct_c"])
+    ap.add_argument("--world-samples", type=int, default=ISMCTS_DEFAULTS["world_samples"],
+                    help="max_world_samples (-1 = unlimited)")
+    ap.add_argument("--final-policy", default=ISMCTS_DEFAULTS["final_policy"],
+                    choices=["MAX_VISIT_COUNT", "MAX_VALUE", "NORMALIZED_VISITED_COUNT"])
+    ap.add_argument("--child-selection", default=None, choices=["UCT", "PUCT"],
+                    help="default UCT; heur-prior defaults to PUCT")
+    ap.add_argument("--prior-eps", type=float, default=None,
+                    help="heur-prior only: (1-eps) on the heuristic's card, eps/|legal| on each legal card")
     ap.add_argument("--partial-tag", default="",
                     help="suffix for the partial/final filenames (e.g. "
                          "'_envcheck') so a default-config run never touches "
@@ -356,6 +434,16 @@ def main():
 
     if args.bot != "honest":
         assert args.partial_tag, "--bot expert-rollout requires --partial-tag (banked files stay untouched)"
+    cfg = dict(ISMCTS_DEFAULTS)
+    cfg.update(rung=args.rung, uct_c=args.uct_c, world_samples=args.world_samples,
+               final_policy=args.final_policy,
+               child_selection=args.child_selection or ("PUCT" if args.rung == "heur-prior" else "UCT"),
+               prior_eps=args.prior_eps if args.rung == "heur-prior" else None)
+    if args.rung == "heur-prior":
+        assert args.prior_eps is not None, "--rung heur-prior requires --prior-eps"
+    os.environ[_ISMCTS_ENV] = json.dumps(cfg)
+    if ismcts_cfg_tag(cfg):
+        assert args.partial_tag, "a non-stock ISMCTS rung/knob requires --partial-tag (banked files stay untouched)"
     run(args.deals, args.workers, args.direction, args.n_outer, args.n_inner,
         args.max_simulations, args.seed_base, args.bot)
 
