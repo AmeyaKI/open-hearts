@@ -10,6 +10,7 @@ Hearts deals 26 points per hand among 4 players, so **6.5 points/hand is symmetr
 |---|---|---|
 | **vs. xinxin** (Sturtevant's reference Hearts bot, at its published 2,000-run/50-world/C=0.4 configuration; no-pass/no-moon variant) — paired diff **−0.776 [−0.910, −0.642] in our favor**, Wilcoxon z=−11.3, at ~9× less time per decision | **6.11** (xinxin: 6.89) | 1,000 deals × 14 mixed seating configurations = 14,000 games |
 | **vs. OpenSpiel's generic ISMCTS baseline** (untuned, random rollouts) — first third-party benchmark | **4.70** (baseline: 7.10) | 1,000 matched deals |
+| **vs. OpenSpiel ISMCTS given this project's own card-play heuristic** as rollout policy and move prior (opponent built for this project) — margin **1.10** [0.81, 1.40] at ~4× its compute, **1.57** [1.29, 1.86] at equal compute | **5.67** (ISMCTS seats: 6.78) | 500 matched deals |
 | vs. 3 heuristic opponents — constraint beliefs + honest search | **3.25** [3.07, 3.45] | 500 deals × 4 rotations |
 | vs. 3 heuristic opponents — + opponent choice-reading | **2.87** [2.70, 3.04] | 500 deals × 4 rotations |
 | vs. 3 held-out synthetic personalities | **2.35** [2.17, 2.52] | 500 deals × 4 rotations |
@@ -612,6 +613,39 @@ Both expectations were met. In the xinxin replication the margin is −0.696 [�
 **What remains unreplayable.** xinxin's own random generators cannot be controlled through OpenSpiel's wrapper, so xinxin games are reproducible on TallyHearts's seats only. ISMCTS games are fully replayable from 2026-09-26 onward. Rows banked before that date remain valid statistical samples and are not replayable game for game.
 
 **The benchmark registry.** [`docs/BENCHMARK_REGISTRY.md`](BENCHMARK_REGISTRY.md) was introduced alongside this work. It lists every opponent a claim rests on, with its source, license, settings, seeds, evidence class and caveats, and fixes one canonical wording per result. No external claim is made unless its opponent has an entry there.
+
+### A domain-aware ISMCTS opponent (2026-09-27 to 2026-09-28)
+
+**Why.** The first external comparison beat OpenSpiel's ISMCTS as shipped: random playouts, no card sense, default settings. The fair objection is that the same search would do better with some Hearts knowledge and tuning. This experiment builds that stronger opponent and measures it.
+
+**The ladder.** Every rung is OpenSpiel's own `ISMCTSBot` tree search, untouched, with progressively more of this project's knowledge supplied through the two hooks OpenSpiel exposes, the rollout and the move prior (`experiments/cbench/evaluators.py`, `experiments/run_cbench.py --rung`). Settings were chosen on a separate stream of 100 tuning deals that is never used for evaluation (`experiments/tune_ismcts.py`). Rungs were matched to the opponent's wall-clock per decision, and the final rung was also run at TallyHearts's own cost.
+
+Same 500 deals throughout, one TallyHearts seat against three ISMCTS seats:
+
+| Rung | ISMCTS configuration | Simulations | ISMCTS s/decision | TallyHearts | ISMCTS seats | Margin |
+|---|---|---|---|---|---|---|
+| 0 | Stock: random rollout, UCT c = 2.0 | 1,000 | 0.10 to 0.12 | 4.901 (4.689, 5.109) | 7.033 (6.963, 7.104) | 2.132 (1.854, 2.415) |
+| 1 | Tuned: random rollout, UCT c = 0.5 | 1,000 | 0.110 | 4.469 (4.258, 4.681) | 7.177 (7.106, 7.247) | 2.708 (2.425, 2.989) |
+| 2 | Beginner heuristic as the rollout policy, c = 0.5 | 2,000 | 0.133 | 5.696 (5.465, 5.924) | 6.768 (6.692, 6.845) | 1.072 (0.769, 1.379) |
+| 3 | Heuristic rollout and heuristic move prior (ε = 0.25), PUCT c = 0.5 | 1,200 | 0.116 | 5.672 (5.452, 5.896) | 6.776 (6.701, 6.849) | **1.104 (0.805, 1.398)** |
+| 3e | As rung 3, at equal compute | 330 | 0.031 (TallyHearts: 0.027) | 5.323 (5.106, 5.535) | 6.892 (6.822, 6.965) | **1.569 (1.287, 1.859)** |
+
+Paired changes in the ISMCTS seats' score from rung to rung (a higher score is worse for ISMCTS): tuning +0.144 (+0.051, +0.239); heuristic rollout −0.409 (−0.512, −0.308); adding the prior +0.008 (−0.096, +0.113); cutting simulations from 1,200 to 330, +0.116 (+0.019, +0.217).
+
+**Against pre-registration.**
+
+1. *Tuning buys ISMCTS up to 0.3*: **falsified in direction.** The setting selected on the tuning deals made ISMCTS 0.14 worse on the 500 evaluation deals. It had been chosen on a 0.10-point difference that lay inside the tuning set's noise. The separate tuning stream did its job: tuning on the evaluation deals would have reported a weaker opponent as "tuned".
+2. *A heuristic rollout buys 0.5 to 1.5 per ISMCTS seat and leaves a margin of about 1.0 to 1.5*: margin **met** (1.07), with intervals well separated; the per-seat gain was **overestimated** (0.41 against rung 1, 0.27 against stock).
+3. *The move prior adds at most 0.3*: **met.** It adds nothing measurable.
+4. *Still ahead by at least 0.8 against rung 3 at about four times the compute, and by at least 1.2 at equal compute*: **met on both**, with lower bounds of 0.805 and 1.287. No rung came within 0.3 of TallyHearts.
+
+**Canonical wording.** "On 500 matched no-pass/no-moon deals, open-hearts (50×20) outscored OpenSpiel's ISMCTS equipped with open-hearts' own card-play heuristic as its rollout policy and move prior by 1.10 points per hand (95% CI 0.81–1.40) when ISMCTS was given about four times our per-decision compute, and by 1.57 (1.29–1.86) at equal compute; the opponent was built by us from OpenSpiel's algorithm, its knobs selected on held-out deals."
+
+**What it means.** Card knowledge in the rollout accounts for about half of the original 2.1-point margin over the stock baseline. The remaining 1.1 to 1.6 points are attributable to what still differs once card sense is equalised: exact inference that respects known voids, values computed under the rules actually scored, and paired evaluation of candidate cards.
+
+**Two flaws in the stock baseline, disclosed.** OpenSpiel's terminal returns apply the shoot-the-moon bonus even on the no-moon variant, so the stock rungs search with a slightly wrong objective; the heuristic rungs use the correct no-moon values. OpenSpiel's world resampler also ignores voids revealed by discards, so about 38% of the worlds the heuristic rungs evaluated were impossible given the play so far. Repairing the resampler would amount to building a different algorithm and was left as future work.
+
+**Limits.** Rungs 2 and 3 ran at the tuned exploration constant, which rung 1 showed to be worse than the stock value under random rollouts, so the strongest fair opponent may be slightly stronger than measured; a follow-up at the stock value is planned and has not been run. The wall-clock matches drifted in the opponent's favour by 21% (rung 2), 5% (rung 3) and 15% (rung 3e). The comparison covers one seating, one variant and one machine. TallyHearts ran on the unfused path in this harness, which makes decisions bitwise-identical to the shipped fused bot.
 
 ## Known limitations
 
