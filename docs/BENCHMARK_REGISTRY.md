@@ -5,6 +5,8 @@ exactly what it is and how far its numbers can be trusted. Maintained since 2026
 post-Phase-7 program, item B0). **Rule: no external claim leaves the repo unless its opponent has a
 row here, and the claim uses that row's canonical wording.** Gaps are written as gaps.
 
+**Owner review: approved 2026-09-29 (B0 closed).** Rows added after that date are lead-written and stand until the next review; the B1 rows (2026-09-28) were part of the approved text.
+
 Variant for every row unless stated: **no-pass / no-moon Hearts** (`hearts(pass_cards=False,
 qs_breaks_hearts=False)` in OpenSpiel terms; standard per-trick scoring, Q♠ = 13, 2♣ leads trick 1,
 no shoot-the-moon rescoring). Points are per seat-hand, lower is better; a 4-seat hand sums to 26.
