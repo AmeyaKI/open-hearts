@@ -14,3 +14,5 @@ TODO
 cpp/build/
 *.so
 !docs/BENCHMARK_REGISTRY.md
+# external opponent checkouts + released weights (scripts/build_perilune.sh)
+external/
