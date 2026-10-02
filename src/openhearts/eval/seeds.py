@@ -18,6 +18,10 @@ here so two harnesses can never share a stream by accident:
                          xinxin's own generators are not controllable through
                          OpenSpiel's wrapper, so games there are NOT replayable
                          -- recorded in docs/BENCHMARK_REGISTRY.md)
+    HARNESS_PERILUNE = 3 experiments/run_perilune_match.py and
+                         run_perilune_belief.py (our seats; Perilune's raw net
+                         is a deterministic argmax, so these games ARE fully
+                         replayable)
 
 Rows written under this derivation carry the header token ``seeds=stable-v1``;
 the harnesses refuse to resume a partial without it, so no pre-B0 banked file
@@ -27,6 +31,7 @@ from openhearts.players.expert_population import DOMAIN_BENCH_SEAT, derive_seed
 
 HARNESS_CBENCH = 1
 HARNESS_XINXIN = 2
+HARNESS_PERILUNE = 3
 SEEDS_TOKEN = "seeds=stable-v1"
 
 
