@@ -55,7 +55,14 @@ python -m pytest -q                      # full suite
 OPENHEARTS_NO_JIT=1 python -m pytest -q  # same suite on the pure-Python reference paths
 ```
 
-Play against it or use it as an advisor at a real table:
+Play against it in your browser -- any mix of humans and bots at one table, with the bot's
+suggested card, its per-card point estimates and the belief heat-map it is working from:
+
+```bash
+python apps/table/server.py            # then open http://127.0.0.1:8765/
+```
+
+Or use it as an advisor at a real table from the terminal:
 
 ```bash
 python experiments/relay.py --advise   # bot suggests, you play
