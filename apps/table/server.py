@@ -35,12 +35,17 @@ sys.path.insert(0, ROOT)
 
 import numpy as np  # noqa: E402
 
-from apps.table.api_contract import DEFAULT_BOT, SEAT_KINDS, SEAT_LABELS  # noqa: E402
+from apps.table.api_contract import (BOT_NAME, DEFAULT_BOT, PARAM_KINDS, SEAT_KINDS,  # noqa: E402
+                                     SEAT_LABELS)
 from openhearts.belief.table import BeliefTable, Level  # noqa: E402
 from openhearts.engine import cards  # noqa: E402
-from openhearts.engine.game import deal, trick_points, trick_winner  # noqa: E402
+from openhearts.engine.game import deal, legal_moves, trick_points, trick_winner  # noqa: E402
+from openhearts.engine.state import PlayerView  # noqa: E402
 from openhearts.eval.records import record_from, to_line  # noqa: E402
+from openhearts.players.expert import ExpertPlayer  # noqa: E402
+from openhearts.players.expert_population import N_TRAIN, is_heldout, sample_expert  # noqa: E402
 from openhearts.players.heuristic import HeuristicPlayer  # noqa: E402
+from openhearts.players.personality import PersonalityPlayer, sample_personality  # noqa: E402
 from openhearts.players.random_player import RandomPlayer  # noqa: E402
 from openhearts.search.honest import HonestSearchPlayer  # noqa: E402
 
@@ -63,14 +68,147 @@ def parse_card(text: str) -> int:
     return cards._SUITS.index(s[1].lower()) * 13 + cards._RANKS.index(s[0].upper())
 
 
+def _perilune_available() -> bool:
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "experiments"))
+        from perilune import adapter
+        return adapter.available()
+    except Exception:
+        return False
+
+
+def available_kinds():
+    """What this server can seat, in display order (GET /api/kinds)."""
+    kinds = [{"kind": "human", "label": "Human (this keyboard)"},
+             {"kind": "table", "label": "Human at the table"},
+             {"kind": "search", "label": f"{BOT_NAME} (main bot)"},
+             {"kind": "heuristic", "label": "Heuristic bot"},
+             {"kind": "random", "label": "Random bot"},
+             {"kind": "expert", "label": "Expert bot", "param": f"id 1-{N_TRAIN}"},
+             {"kind": "personality", "label": "Personality bot", "param": "seed"}]
+    if _perilune_available():
+        kinds.append({"kind": "perilune", "label": "Perilune raw net", "param": "v5|v6.1"})
+    return kinds
+
+
+def parse_kind(kind: str):
+    """'expert:17' -> ('expert', '17'); validates against the contract. Raises ValueError."""
+    kind = str(kind)
+    base, _, param = kind.partition(":")
+    if base in SEAT_KINDS and not param:
+        return base, None
+    if base == "expert":
+        try:
+            i = int(param)
+        except ValueError:
+            raise ValueError(f"expert id must be a number, got {param!r}")
+        if not 1 <= i <= N_TRAIN or is_heldout(i):
+            raise ValueError(f"expert id must be 1-{N_TRAIN} (held-out experts are never seated)")
+        return base, str(i)
+    if base == "personality":
+        try:
+            n = int(param)
+        except ValueError:
+            raise ValueError(f"personality seed must be a number, got {param!r}")
+        if n < 0:
+            raise ValueError("personality seed must be non-negative")
+        return base, str(n)
+    if base == "perilune":
+        if param not in ("v5", "v6.1"):
+            raise ValueError("perilune net must be v5 or v6.1")
+        if not _perilune_available():
+            raise ValueError("Perilune weights are not installed (scripts/build_perilune.sh)")
+        return base, param
+    raise ValueError(f"unknown seat kind {kind!r}")
+
+
 def _make_bot(kind: str, rng):
-    if kind == "search":
+    base, param = parse_kind(kind)
+    if base == "search":
         return HonestSearchPlayer(Level.FULL, N_OUTER, N_INNER, rng, fused=True)
-    if kind == "heuristic":
+    if base == "heuristic":
         return HeuristicPlayer()
-    if kind == "random":
+    if base == "random":
         return RandomPlayer(rng)
+    if base == "expert":
+        return ExpertPlayer(rng, sample_expert(int(param)))
+    if base == "personality":
+        return PersonalityPlayer(rng, sample_personality(int(param)))
+    if base == "perilune":
+        from perilune import adapter
+        return adapter.PeriluneRawPlayer(param)
     raise ValueError(kind)
+
+
+class RealState:
+    """A physical deal: the server knows only the typed-in hands of keyboard humans and bots.
+
+    Same surface as engine.GameState as far as Table uses it (hands, history, current_trick,
+    hearts_broken, trick_number, scores, to_play, is_over, copy, view_for, play) but `play`
+    accepts a "table" seat's card from the WIDEST legal set (experiments/relay.py rule): every
+    card not yet played and not in a known hand, with the lead rules applied when leading.
+    Following suit is deliberately NOT enforced for a table seat -- a real void is common and
+    undetectable from here, and a true play must never be rejected.
+    """
+
+    def __init__(self, known_hands: dict, table_seats: set, leader: int):
+        self.hands = [int(known_hands.get(s, 0)) for s in range(4)]
+        self.table_seats = set(table_seats)
+        self.played_by = [0, 0, 0, 0]
+        self.history, self.current_trick = [], []
+        self.hearts_broken, self.trick_number = False, 0
+        self.scores, self.to_play = [0, 0, 0, 0], leader
+
+    def copy(self):
+        c = RealState.__new__(RealState)
+        c.__dict__.update({k: (list(v) if isinstance(v, list) else (set(v) if isinstance(v, set) else v))
+                           for k, v in self.__dict__.items()})
+        return c
+
+    def is_over(self):
+        return self.trick_number >= 13 and not self.current_trick
+
+    def all_played(self):
+        m = 0
+        for _, c in self.history + self.current_trick:
+            m |= cards.bit(c)
+        return m
+
+    def known_union(self):
+        return self.hands[0] | self.hands[1] | self.hands[2] | self.hands[3]
+
+    def candidates(self, seat):
+        if seat not in self.table_seats:
+            return legal_moves(self.hands[seat], tuple(self.current_trick), self.hearts_broken,
+                               self.trick_number)
+        pool = cards.FULL_DECK & ~self.all_played() & ~self.known_union()
+        if not self.current_trick:
+            return legal_moves(pool, (), self.hearts_broken, self.trick_number)
+        return pool
+
+    def view_for(self, seat):
+        return PlayerView(seat=seat, hand=self.hands[seat], history=tuple(self.history),
+                          current_trick=tuple(self.current_trick), hearts_broken=self.hearts_broken,
+                          trick_number=self.trick_number, scores=tuple(self.scores),
+                          legal_moves=self.candidates(seat))
+
+    def play(self, card):
+        seat = self.to_play
+        assert self.candidates(seat) & cards.bit(card), f"illegal card {card} by seat {seat}"
+        self.hands[seat] &= ~cards.bit(card)
+        self.played_by[seat] |= cards.bit(card)
+        self.current_trick.append((seat, card))
+        if cards.suit(card) == cards.HEARTS:
+            self.hearts_broken = True
+        if len(self.current_trick) == 4:
+            w = trick_winner(self.current_trick)
+            self.scores[w] += trick_points(self.current_trick)
+            self.history.extend(self.current_trick)
+            self.current_trick = []
+            self.trick_number += 1
+            self.to_play = w
+        else:
+            self.to_play = (seat + 1) % 4
 
 
 def illegal_reason(view, card: int) -> str:
@@ -112,42 +250,95 @@ class Table:
         self.undo_stack = []
         self._advice_cache = None
         self._logged = False
+        self.mode = "virtual"
+        self.announce = None
+        self.divergences = 0
 
     # ------------------------------------------------------------ setup
     def n_humans(self) -> int:
         return sum(1 for s in self.seats if s["is_human"])
 
+    def n_keyboard_humans(self) -> int:
+        return sum(1 for s in self.seats if s["kind"] == "human")
+
+    def table_turn(self) -> bool:
+        return self.phase == "playing" and self.seats[self.state.to_play]["kind"] == "table"
+
     def _rng(self, seat: int, salt: int):
         return np.random.default_rng([int(self.seed), int(seat), salt])
 
-    def new_hand(self, seats, seed, advisor_on):
+    def _parse_hands(self, hands, table_seats):
+        """Real mode: {"seat": [13 card strings]} for every non-table seat; disjoint."""
+        hands = hands or {}
+        known, seen = {}, 0
+        for i in range(4):
+            if i in table_seats:
+                continue
+            lst = hands.get(str(i), hands.get(i))
+            if not lst:
+                raise ValueError(f"real-table hand needs the 13 cards of seat {i} ({self.seats[i]['name']})")
+            mask = 0
+            for text in lst:
+                c = parse_card(text)
+                if mask & cards.bit(c):
+                    raise ValueError(f"{card_str(c)} listed twice for seat {i}")
+                mask |= cards.bit(c)
+            if bin(mask).count("1") != 13:
+                raise ValueError(f"seat {i} needs exactly 13 cards, got {bin(mask).count('1')}")
+            if mask & seen:
+                dup = cards.cards_in(mask & seen)[0]
+                raise ValueError(f"{card_str(dup)} is in two hands")
+            seen |= mask
+            known[i] = mask
+        return known
+
+    def new_hand(self, seats, seed, advisor_on, hands=None, leader=None):
         if len(seats) != 4:
             raise ValueError("need exactly four seats")
         cfg = []
         for i, s in enumerate(seats):
             kind = str(s.get("kind", DEFAULT_BOT))
-            if kind not in SEAT_KINDS:
-                raise ValueError(f"unknown seat kind {kind!r}; choose from {list(SEAT_KINDS)}")
+            parse_kind(kind)                                    # raises on a bad kind
             name = str(s.get("name") or SEAT_LABELS[i])[:24]
-            cfg.append({"seat": i, "kind": kind, "name": name, "is_human": kind == "human"})
+            cfg.append({"seat": i, "kind": kind, "name": name,
+                        "is_human": kind in ("human", "table")})
+        table_seats = {i for i, s in enumerate(cfg) if s["kind"] == "table"}
         self.seats = cfg
         self.seed = int(seed) if seed is not None else int(np.random.SeedSequence().entropy % (1 << 31))
         self.hand_id += 1
         self.advisor_on = bool(advisor_on)
-        self.state = deal(np.random.default_rng(self.seed))
-        self.initial_hands = list(self.state.hands)
+        self.announce = None
+        self.divergences = 0
+        if table_seats:
+            self.mode = "real"
+            known = self._parse_hands(hands, table_seats)
+            holder = [i for i, m in known.items() if m & cards.bit(cards.TWO_CLUBS)]
+            if holder:
+                lead = holder[0]
+            elif len(table_seats) == 1:
+                lead = next(iter(table_seats))
+            elif leader is not None and int(leader) in table_seats:
+                lead = int(leader)
+            else:
+                raise ValueError("several table seats and nobody known holds 2c: pass \"leader\"")
+            self.state = RealState(known, table_seats, lead)
+            self.initial_hands = None                           # reconstructed at the end
+        else:
+            self.mode = "virtual"
+            self.state = deal(np.random.default_rng(self.seed))
+            self.initial_hands = list(self.state.hands)
         self.bots = {i: _make_bot(s["kind"], self._rng(i, BOT_SALT))
                      for i, s in enumerate(self.seats) if not s["is_human"]}
         self.advisors = {i: HonestSearchPlayer(Level.FULL, N_OUTER, N_INNER,
                                                self._rng(i, ADVISOR_SALT), fused=True)
-                         for i, s in enumerate(self.seats) if s["is_human"]}
+                         for i, s in enumerate(self.seats) if s["kind"] == "human"}
         self.last_trick = None
         self.error = None
         self.undo_stack = []
         self._advice_cache = None
         self._logged = False
         self.phase = "playing"
-        self.revealed = self.n_humans() <= 1
+        self.revealed = self.n_keyboard_humans() <= 1
         self._advance_bots()
         self._autosave()
 
@@ -169,9 +360,11 @@ class Table:
         while self.phase == "playing" and not self.seats[self.state.to_play]["is_human"]:
             seat = self.state.to_play
             card = self.bots[seat].choose(self.state.view_for(seat))
+            if self.mode == "real":
+                self.announce = {"seat": seat, "card": card_str(card), "name": self.seats[seat]["name"]}
             self._apply(seat, card)
         if self.phase == "playing":
-            self.revealed = self.n_humans() <= 1
+            self.revealed = self.n_keyboard_humans() <= 1
 
     def human_turn(self) -> bool:
         return self.phase == "playing" and self.seats[self.state.to_play]["is_human"]
@@ -179,19 +372,37 @@ class Table:
     def play(self, card_text: str):
         if not self.human_turn():
             raise ValueError("it is not a human's turn")
-        if not self.revealed:
-            raise ValueError("reveal the hand before playing")
         card = parse_card(card_text)
         seat = self.state.to_play
         view = self.state.view_for(seat)
-        if not view.hand & cards.bit(card):
-            raise ValueError(f"{card_str(card)} is not in {self.seats[seat]['name']}'s hand")
-        if not view.legal_moves & cards.bit(card):
-            raise ValueError(f"{card_str(card)}: {illegal_reason(view, card)}")
+        if self.table_turn():
+            if not view.legal_moves & cards.bit(card):
+                raise ValueError(f"{card_str(card)} cannot be {self.seats[seat]['name']}'s play: "
+                                 "already played, held by a known seat, or an illegal lead")
+        else:
+            if not self.revealed:
+                raise ValueError("reveal the hand before playing")
+            if not view.hand & cards.bit(card):
+                raise ValueError(f"{card_str(card)} is not in {self.seats[seat]['name']}'s hand")
+            if not view.legal_moves & cards.bit(card):
+                raise ValueError(f"{card_str(card)}: {illegal_reason(view, card)}")
+            self._log_divergence(seat, card)
         self.undo_stack.append(self._snapshot())
         self._apply(seat, card)
         self._advance_bots()
         self._autosave()
+
+    def _log_divergence(self, seat, card):
+        """Keyboard human played against the advice that was on screen -> one log line."""
+        adv = self._advice_cache
+        if not self.advisor_on or adv is None or adv["suggested"] == card_str(card):
+            return
+        means = {c["card"]: c["mean_points"] for c in adv["candidates"]}
+        with open(self.divergence_path, "a") as f:
+            f.write(f"{self.hand_id} {self.seed} {seat} {self.state.trick_number + 1} "
+                    f"{adv['suggested']} {card_str(card)} {means.get(adv['suggested'], 'na')} "
+                    f"{means.get(card_str(card), 'na')}\n")
+        self.divergences += 1
 
     def reveal(self):
         if self.human_turn():
@@ -228,13 +439,16 @@ class Table:
 
     def _snapshot(self):
         return {"state": self.state.copy(), "last_trick": copy.deepcopy(self.last_trick),
-                "rng": copy.deepcopy(self._rng_states()), "phase": self.phase}
+                "rng": copy.deepcopy(self._rng_states()), "phase": self.phase,
+                "announce": copy.deepcopy(self.announce), "divergences": self.divergences}
 
     def _restore(self, snap):
         self.state = snap["state"].copy()
         self.last_trick = copy.deepcopy(snap["last_trick"])
         self._set_rng_states(snap["rng"])
         self.phase = snap["phase"]
+        self.announce = snap.get("announce")
+        self.divergences = snap.get("divergences", 0)
 
     def _plays(self):
         return list(self.state.history) + list(self.state.current_trick)
@@ -243,9 +457,15 @@ class Table:
         if self.state is None:
             return
         doc = {"seats": self.seats, "seed": self.seed, "hand_id": self.hand_id,
-               "advisor_on": self.advisor_on, "initial_hands": [int(h) for h in self.initial_hands],
+               "advisor_on": self.advisor_on, "mode": self.mode,
+               "initial_hands": [int(h) for h in self.initial_hands] if self.initial_hands else None,
+               "known_hands": ({str(s): int(self.state.hands[s] | self.state.played_by[s])
+                                for s in range(4) if s not in self.state.table_seats}
+                               if self.mode == "real" else None),
+               "table_seats": sorted(getattr(self.state, "table_seats", [])),
+               "leader": (self._plays()[0][0] if self._plays() else self.state.to_play),
                "plays": [[int(s), int(c)] for s, c in self._plays()],
-               "rng": self._rng_states(), "phase": self.phase}
+               "rng": self._rng_states(), "phase": self.phase, "divergences": self.divergences}
         tmp = self.resume_path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(doc, f)
@@ -259,6 +479,10 @@ class Table:
     def log_path(self):
         return os.path.join(self.results_dir, "table_records.txt")
 
+    @property
+    def divergence_path(self):
+        return os.path.join(self.results_dir, "table_divergence.txt")
+
     def resume(self):
         if not os.path.exists(self.resume_path):
             raise ValueError("nothing to resume")
@@ -266,14 +490,22 @@ class Table:
             doc = json.load(f)
         self.seats = doc["seats"]
         self.seed, self.hand_id, self.advisor_on = doc["seed"], doc["hand_id"], doc["advisor_on"]
-        self.state = deal(np.random.default_rng(self.seed))
-        assert [int(h) for h in self.state.hands] == doc["initial_hands"], "resume file does not match its seed"
-        self.initial_hands = list(self.state.hands)
+        self.mode = doc.get("mode", "virtual")
+        self.announce = None
+        self.divergences = doc.get("divergences", 0)
+        if self.mode == "real":
+            known = {int(k): int(v) for k, v in doc["known_hands"].items()}
+            self.state = RealState(known, set(doc["table_seats"]), int(doc["leader"]))
+            self.initial_hands = None
+        else:
+            self.state = deal(np.random.default_rng(self.seed))
+            assert [int(h) for h in self.state.hands] == doc["initial_hands"], "resume file does not match its seed"
+            self.initial_hands = list(self.state.hands)
         self.bots = {i: _make_bot(s["kind"], self._rng(i, BOT_SALT))
                      for i, s in enumerate(self.seats) if not s["is_human"]}
         self.advisors = {i: HonestSearchPlayer(Level.FULL, N_OUTER, N_INNER,
                                                self._rng(i, ADVISOR_SALT), fused=True)
-                         for i, s in enumerate(self.seats) if s["is_human"]}
+                         for i, s in enumerate(self.seats) if s["kind"] == "human"}
         self.last_trick = None
         self.phase = "playing"
         self._logged = doc["phase"] == "over"       # never log the same hand twice
@@ -283,13 +515,14 @@ class Table:
         self._set_rng_states(doc["rng"])
         self.undo_stack = []
         self.error = None
-        self.revealed = self.n_humans() <= 1
+        self.revealed = self.n_keyboard_humans() <= 1
         self._advice_cache = None
 
     def _log_record(self):
         if self._logged:
             return
-        rec = record_from(self.seed, self.initial_hands, self.state)
+        hands = self.initial_hands if self.initial_hands is not None else list(self.state.played_by)
+        rec = record_from(self.seed, hands, self.state)
         with open(self.log_path, "a") as f:
             f.write(to_line(rec) + "\n")
         self._logged = True
@@ -334,19 +567,22 @@ class Table:
 
     # ------------------------------------------------------------ state
     def snapshot_json(self):
-        base = {"phase": self.phase, "seats": self.seats, "to_play": None, "human_turn": False,
+        seats_json = [dict(x, is_human=(x["kind"] == "human")) for x in self.seats]   # "table" seats: false
+        base = {"phase": self.phase, "seats": seats_json, "to_play": None, "human_turn": False,
                 "revealed": self.revealed, "trick_number": 0, "hearts_broken": False,
                 "scores": [0, 0, 0, 0], "current_trick": [], "last_trick": None, "history": [],
                 "hand": None, "legal": [], "illegal_reasons": {}, "advisor_on": self.advisor_on,
                 "advice": None, "hand_id": self.hand_id, "seed": self.seed,
                 "log_path": os.path.relpath(self.log_path, ROOT),
-                "latency_budget_s": LATENCY_BUDGET_S, "error": self.error}
+                "latency_budget_s": LATENCY_BUDGET_S, "error": self.error,
+                "mode": self.mode, "table_turn": False, "candidates": [], "announce": None,
+                "divergences": self.divergences}
         if self.state is None:
             return base
         st = self.state
         base.update({
             "to_play": None if self.phase == "over" else st.to_play,
-            "human_turn": self.human_turn(),
+            "human_turn": self.human_turn() and not self.table_turn(),   # keyboard human to act
             "trick_number": st.trick_number, "hearts_broken": st.hearts_broken,
             "scores": list(st.scores),
             "current_trick": [{"seat": s, "card": card_str(c)} for s, c in st.current_trick],
@@ -354,6 +590,11 @@ class Table:
             "history": [{"seat": s, "card": card_str(c), "trick": i // 4}
                         for i, (s, c) in enumerate(st.history)],
         })
+        base["announce"] = self.announce if self.mode == "real" else None
+        if self.table_turn():
+            base["table_turn"] = True
+            base["candidates"] = [card_str(c) for c in cards.cards_in(st.candidates(st.to_play))]
+            return base
         if self.human_turn() and self.revealed:
             view = st.view_for(st.to_play)
             hand = cards.cards_in(view.hand)
@@ -410,6 +651,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             with self.table.lock:
                 self._send_json(self.table.snapshot_json())
+        elif path == "/api/kinds":
+            self._send_json({"kinds": available_kinds()})
         elif path == "/":
             self._send_file("index.html")
         elif path.startswith("/static/"):
@@ -430,7 +673,8 @@ class Handler(BaseHTTPRequestHandler):
         with t.lock:
             try:
                 if path == "/api/new":
-                    t.new_hand(body.get("seats") or [], body.get("seed"), body.get("advisor_on", True))
+                    t.new_hand(body.get("seats") or [], body.get("seed"), body.get("advisor_on", True),
+                               hands=body.get("hands"), leader=body.get("leader"))
                 elif path == "/api/play":
                     t.play(body.get("card", ""))
                 elif path == "/api/reveal":

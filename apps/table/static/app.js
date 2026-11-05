@@ -1,16 +1,20 @@
 "use strict";
 /* The Table - front end. Vanilla JS, no dependencies. See apps/table/api_contract.py. */
 
-var MOCK = new URLSearchParams(location.search).get("mock") === "1";
+var MOCK_Q = new URLSearchParams(location.search).get("mock");
+var MOCK = MOCK_Q === "1" || MOCK_Q === "real";
+var MOCK_URL = MOCK_Q === "real" ? "/static/fixture_real.json" : "/static/fixture_state.json";
 var SEAT_LABELS = ["South", "West", "North", "East"];
 var SEAT_POS = ["bottom", "left", "top", "right"];
-var KINDS = [
-  ["human", "Human"],
-  ["search", "Search bot (main)"],
-  ["heuristic", "Heuristic bot"],
-  ["random", "Random bot"]
+var FALLBACK_KINDS = [
+  { kind: "human", label: "Human" },
+  { kind: "table", label: "Human at the table" },
+  { kind: "search", label: "Candor (main bot)" },
+  { kind: "heuristic", label: "Heuristic bot" },
+  { kind: "random", label: "Random bot" }
 ];
-var KIND_LABEL = { human: "human", search: "search", heuristic: "heuristic", random: "random" };
+var kinds = FALLBACK_KINDS.slice();
+var KIND_LABEL = { human: "human", table: "TABLE", search: "search", heuristic: "heuristic", random: "random" };
 var SUITS = { c: "♣", d: "♦", s: "♠", h: "♥" };
 var SUIT_NAME = { c: "clubs", d: "diamonds", s: "spades", h: "hearts" };
 var HAND_SUIT_ORDER = ["s", "h", "c", "d"];
@@ -45,9 +49,16 @@ var optimistic = false;  /* the human's own card was placed before the server re
 var thinking = null;     /* seat showing "..." */
 var enter = null;        /* {idx, at, hand}: the card currently sliding in */
 var gather = null;       /* {at, winner}: a gather in progress */
+var announceBanner = null; /* {seat, card, name, until} */
+var lastAnnounceKey = null;
+var flashDiv = false;
+var lastDiv = 0;
 var panelState = null;   /* state the advisor/reasoning panels are showing (only updated when drained) */
 
 var setupDraft = {
+  step: "seats",           /* "seats" | "hands" (real-table hand entry) */
+  hands: { 0: [], 1: [], 2: [], 3: [] },
+  params: ["", "", "", ""],
   names: ["You", "West", "North", "East"],
   kinds: ["human", "search", "search", "search"],
   seed: "",
@@ -149,7 +160,7 @@ function backCard() { return '<span class="card back" aria-hidden="true"></span>
 /* ---------- network ---------- */
 
 function apiGet() {
-  var url = MOCK ? "/static/fixture_state.json" : "/api/state";
+  var url = MOCK ? MOCK_URL : "/api/state";
   return fetch(url, { cache: "no-store" }).then(function (r) { return r.json(); });
 }
 
@@ -201,7 +212,27 @@ function resetInstant() {
 }
 
 /* A new server state arrived. If it extends what is shown, queue the difference; otherwise reset. */
+function trackExtras(s, fresh) {
+  if (fresh || (state && state.hand_id !== s.hand_id)) { lastAnnounceKey = null; announceBanner = null; lastDiv = 0; }
+  var ak = s.announce ? JSON.stringify(s.announce) : null;
+  if (ak && ak !== lastAnnounceKey) {
+    var nm = s.announce.name || (s.seats && s.seats[s.announce.seat] && s.seats[s.announce.seat].name) || SEAT_LABELS[s.announce.seat];
+    announceBanner = { seat: s.announce.seat, card: s.announce.card, name: nm, until: Date.now() + 4000 };
+    setTimeout(function () {
+      if (announceBanner && Date.now() >= announceBanner.until - 50) { announceBanner = null; animRedraw(); }
+    }, 4100);
+  }
+  lastAnnounceKey = ak;
+  var d = s.divergences || 0;
+  if (d > lastDiv && state && state.hand_id === s.hand_id) {
+    flashDiv = true;
+    setTimeout(function () { flashDiv = false; animRedraw(); }, 1500);
+  }
+  lastDiv = d;
+}
+
 function ingest(s, forceReset, fresh) {
+  trackExtras(s, fresh);
   state = s;
   if (fresh && s.phase !== "setup") {
     /* A newly dealt hand: start from an EMPTY table and animate the bots' opening plays too. */
@@ -253,7 +284,8 @@ async function run(my) {
 async function doPlay(my, play) {
   var info = state.seats && state.seats[play.seat];
   var human = !!(info && info.is_human);
-  if (!human) {
+  var instant = human || !!(info && info.kind === "table");
+  if (!instant) {
     thinking = play.seat;
     animRedraw();
     await sleep(THINK_MS);
@@ -264,7 +296,7 @@ async function doPlay(my, play) {
   enter = { idx: rendered.length - 1, at: Date.now(), hand: human };
   animRedraw();
   if (rendered.length - gTricks * 4 >= 4) return; /* trick complete: the gather's hold covers the pause */
-  await sleep(human ? PLAY_GAP_MS : PLAY_GAP_MS - THINK_MS);
+  await sleep(instant ? PLAY_GAP_MS : PLAY_GAP_MS - THINK_MS);
 }
 
 async function doGather(my) {
@@ -322,7 +354,7 @@ function act(path, body, after, opts) {
 /* ---------- rendering ---------- */
 
 function render() {
-  var key = JSON.stringify([view, state, busy, dismissedError, localError]);
+  var key = JSON.stringify([view, state, busy, dismissedError, localError, setupDraft, announceBanner, flashDiv]);
   if (key === lastKey) return;
   lastKey = key;
   if (!isAnimating()) panelState = state;
@@ -344,26 +376,114 @@ function errorStrip() {
     '</span><button type="button" data-act="dismiss" aria-label="Dismiss">×</button></div>';
 }
 
+function kindInfo(k) {
+  for (var i = 0; i < kinds.length; i++) if (kinds[i].kind === k) return kinds[i];
+  return null;
+}
+function seatKindString(s) {
+  var k = setupDraft.kinds[s], p = String(setupDraft.params[s] || paramDefault(k)).trim();
+  var ki = kindInfo(k);
+  return ki && ki.param ? k + ":" + p : k;
+}
+function paramDefault(k) {
+  if (k === "expert") return "1";
+  if (k === "personality") return "1";
+  if (k === "perilune") return "v5";
+  return "";
+}
+function tableSeats() {
+  var out = [];
+  for (var s = 0; s < 4; s++) if (setupDraft.kinds[s] === "table") out.push(s);
+  return out;
+}
+function isRealSetup() { return tableSeats().length > 0; }
+function paramInputHTML(s) {
+  var k = setupDraft.kinds[s], ki = kindInfo(k);
+  if (!ki || !ki.param) return "";
+  var v = setupDraft.params[s] || paramDefault(k);
+  if (k === "perilune") {
+    return '<select class="param" data-setup="param" data-seat="' + s + '" aria-label="Perilune version for seat ' + s + '">' +
+      ["v5", "v6.1"].map(function (o) { return '<option value="' + o + '"' + (v === o ? " selected" : "") + ">" + o + "</option>"; }).join("") + "</select>";
+  }
+  var ph = k === "expert" ? "id 1-200" : "seed";
+  return '<input class="param" type="number" min="' + (k === "expert" ? 1 : 0) + '"' + (k === "expert" ? ' max="200"' : "") +
+    ' data-setup="param" data-seat="' + s + '" value="' + esc(v) + '" placeholder="' + ph + '" aria-label="' + ph + ' for seat ' + s + '">';
+}
+
 function setupHTML() {
+  if (setupDraft.step === "hands" && isRealSetup()) return handsEntryHTML();
+  var real = isRealSetup();
   var h = '<div class="setup"><h1>The Table</h1><p class="sub">Four seats, one deck. Choose who sits where.</p><div class="setup-card">';
   for (var s = 0; s < 4; s++) {
     h += '<div class="setup-row"><span class="seat-tag">' + SEAT_LABELS[s] + '</span>' +
       '<input type="text" data-setup="name" data-seat="' + s + '" value="' + esc(setupDraft.names[s]) + '" maxlength="24" aria-label="Name for seat ' + s + '">' +
       '<select data-setup="kind" data-seat="' + s + '" aria-label="Kind for seat ' + s + '">';
-    KINDS.forEach(function (k) {
-      h += '<option value="' + k[0] + '"' + (setupDraft.kinds[s] === k[0] ? " selected" : "") + ">" + k[1] + "</option>";
+    kinds.forEach(function (k) {
+      h += '<option value="' + esc(k.kind) + '"' + (setupDraft.kinds[s] === k.kind ? " selected" : "") + ">" + esc(k.label) + "</option>";
     });
-    h += "</select></div>";
+    h += "</select>" + paramInputHTML(s) + "</div>";
   }
+  h += '<p class="explain">Virtual: the server deals. Real table: at least one seat is ‘Human at the table’; type in every other seat’s 13 cards, then transcribe the table players’ cards as they fall.</p>';
   h += '<div class="setup-row"><span class="seat-tag">Seed</span>' +
     '<input type="text" inputmode="numeric" data-setup="seed" value="' + esc(setupDraft.seed) + '" placeholder="optional (random if empty)">' +
     "</div>" +
     '<label class="check"><input type="checkbox" data-setup="advisor"' + (setupDraft.advisor ? " checked" : "") + "> Advisor on</label>" +
     '<div class="setup-actions">' +
     (state && state.phase !== "setup" ? '<button type="button" class="btn ghost" data-act="cancel-setup">Back to table</button>' : "") +
-    '<button type="button" class="btn primary" data-act="deal"' + (busy ? " disabled" : "") + ">Deal</button></div>" +
-    '<p class="hint">' + (busy ? "Dealing..." : "Bots play until the first human must act.") + "</p>" +
+    '<button type="button" class="btn primary" data-act="deal"' + (busy ? " disabled" : "") + ">" + (real ? "Start real-table hand" : "Deal") + "</button></div>" +
+    '<p class="hint">' + (busy ? "Dealing..." : (real ? "You will enter the cards of every non-table seat next." : "Bots play until the first human must act.")) + "</p>" +
     "</div></div>";
+  return h;
+}
+
+var GRID_SUITS_PICK = ["s", "h", "c", "d"];
+
+function pickGridHTML(opts) {
+  var h = '<div class="pickgrid">';
+  GRID_SUITS_PICK.forEach(function (suit) {
+    h += '<div class="pickrow"><span class="picksuit ' + (isRed(suit) ? "red" : "black") + '" title="' + SUIT_NAME[suit] + '">' + SUITS[suit] + "</span>";
+    for (var r = RANKS.length - 1; r >= 0; r--) {
+      var c = RANKS[r] + suit, dis = opts.disabled(c);
+      h += '<button type="button" class="pick ' + (isRed(suit) ? "red" : "black") + " " + opts.cls(c) + '"' + (dis ? ' disabled aria-disabled="true"' : "") +
+        ' title="' + esc(opts.title(c)) + '" ' + opts.attrs(c) + ">" + rankLabel(RANKS[r]) + SUITS[suit] + "</button>";
+    }
+    h += "</div>";
+  });
+  return h + "</div>";
+}
+
+function pickedBy(c) {
+  for (var s = 0; s < 4; s++) if (setupDraft.hands[s] && setupDraft.hands[s].indexOf(c) >= 0) return s;
+  return -1;
+}
+function handsEntryHTML() {
+  var tbl = tableSeats();
+  var h = '<div class="setup hands-entry"><h1>Real table: enter the hands</h1><p class="sub">For each seat that is not at the real table, click exactly 13 cards. A card chosen for one seat is greyed out for the others.</p>';
+  var all = true;
+  for (var s = 0; s < 4; s++) {
+    if (tbl.indexOf(s) >= 0) continue;
+    var n = setupDraft.hands[s].length;
+    if (n !== 13) all = false;
+    h += '<div class="setup-card pick-card"><div class="pick-head"><b>' + esc(setupDraft.names[s] || SEAT_LABELS[s]) + '</b> <span class="muted">(' + SEAT_LABELS[s] + ")</span>" +
+      '<span class="counter' + (n === 13 ? " full" : "") + '">' + n + "/13</span>" +
+      '<button type="button" class="btn ghost small" data-act="clear-hand" data-seat="' + s + '">Clear</button></div>' +
+      pickGridHTML({
+        cls: function (c) { return setupDraft.hands[s].indexOf(c) >= 0 ? "sel" : ""; },
+        disabled: function (c) {
+          var by = pickedBy(c);
+          if (by >= 0 && by !== s) return true;
+          return by !== s && n >= 13;
+        },
+        title: function (c) {
+          var by = pickedBy(c);
+          return by >= 0 && by !== s ? "already in " + (setupDraft.names[by] || SEAT_LABELS[by]) + "'s hand" : (n >= 13 && by !== s ? "13 cards already chosen" : cardLabel(c));
+        },
+        attrs: function (c) { return 'data-hand-seat="' + s + '" data-pick="' + c + '"'; }
+      }) + "</div>";
+  }
+  h += '<div class="setup-actions"><button type="button" class="btn ghost" data-act="hands-back">Back</button>' +
+    '<button type="button" class="btn primary" data-act="hands-go"' + (busy ? " disabled" : "") + ">" + (busy ? "Starting..." : "Start hand") + "</button></div>" +
+    '<p class="hint">' + (all ? "All hands complete." : "Every non-table seat needs exactly 13 cards.") + "</p></div>";
   return h;
 }
 
@@ -371,11 +491,11 @@ function seatBoxHTML(s) {
   var info = state.seats[s];
   var tp = dispToPlay();
   var turn = state.phase === "playing" && tp === s;
-  var h = '<div class="seat seat-' + SEAT_POS[s] + (turn || thinking === s ? " turn" : "") + '">' +
+  var h = '<div class="seat seat-' + SEAT_POS[s] + (turn || thinking === s ? " turn" : "") + (announceBanner && announceBanner.seat === s ? " announce" : "") + '">' +
     '<div class="seat-name">' + esc(info.name) + '<span class="badge kind-' + esc(info.kind) + '">' + esc(KIND_LABEL[info.kind] || info.kind) + "</span></div>" +
     '<div class="seat-pts"><b>' + dispScores()[s] + "</b> pts</div>";
   if (thinking === s) h += '<div class="seat-turn thinking" aria-label="thinking">&middot;&middot;&middot;</div>';
-  else if (turn && !isAnimating()) h += '<div class="seat-turn">' + (info.is_human ? "your move" : "thinking...") + "</div>";
+  else if (turn && !isAnimating()) h += '<div class="seat-turn">' + (info.is_human ? "your move" : (info.kind === "table" ? "plays at the table" : "thinking...")) + "</div>";
   return h + "</div>";
 }
 
@@ -436,6 +556,18 @@ function handHTML() {
     return '<div class="hand-wrap"><div class="hand hidden">' + backs + "</div>" +
       (anim ? "" : '<button type="button" class="btn primary reveal" data-act="reveal"' + (busy ? " disabled" : "") +
       ">Tap to reveal " + esc(name) + "'s hand</button>") + "</div>";
+  }
+  if (state.mode === "real" && state.table_turn && !anim) {
+    var cand = {};
+    (state.candidates || []).forEach(function (c) { cand[c] = true; });
+    var nmT = seatName(state.to_play);
+    return '<div class="hand-wrap table-turn"><div class="hand-title">' + esc(nmT) + ' plays at the table \u2014 click the card they played</div>' +
+      pickGridHTML({
+        cls: function (c) { return cand[c] ? "cand" : ""; },
+        disabled: function (c) { return !cand[c] || busy; },
+        title: function (c) { return cand[c] ? "They played " + cardLabel(c) : "already played or held by a known seat"; },
+        attrs: function (c) { return 'data-table-card="' + c + '"'; }
+      }) + "</div>";
   }
   if (!state.human_turn || !state.hand) {
     var m = anim ? left : Math.max(1, 13 - state.trick_number), b2 = "";
@@ -549,6 +681,10 @@ function reasoningHTML(ps) {
 function gameHTML() {
   var anim = isAnimating();
   var h = '<header class="topbar"><h1>The Table</h1>' + (MOCK ? '<span class="mock">mock data</span>' : "") + controlsHTML() + "</header>";
+  if (announceBanner) {
+    h += '<div class="announce-banner" role="status"><b>' + esc(announceBanner.name) + "</b> (bot) plays <b>" + miniCard(announceBanner.card) +
+      "</b> \u2014 play it at the table for them</div>";
+  }
   h += '<div class="layout"><main class="felt-col"><div class="felt">';
   var broken = settledInSync() ? state.hearts_broken : rendered.some(function (p) { return p.card[1] === "h"; });
   var trickNo = anim ? Math.min(13, gTricks + 1) : Math.min(13, state.trick_number + (state.phase === "over" ? 0 : 1));
@@ -564,7 +700,8 @@ function gameHTML() {
   var rea = ps ? reasoningHTML(ps) : "";
   if (rea) h += '<div class="reasoning-row' + stale + '">' + rea + "</div>";
   h += "</div>";
-  h += '<footer class="foot">hand #' + esc(state.hand_id) + " · seed " + esc(state.seed) + " · log " + esc(state.log_path) + "</footer>";
+  h += '<footer class="foot">hand #' + esc(state.hand_id) + " · seed " + esc(state.seed) + " · log " + esc(state.log_path) +
+    ' · <span class="div' + (flashDiv ? " flash" : "") + '">divergences this hand: ' + (state.divergences || 0) + "</span></footer>";
   return h;
 }
 
@@ -578,6 +715,20 @@ function readSeed() {
 }
 
 document.addEventListener("click", function (e) {
+  var pk = e.target.closest && e.target.closest("[data-pick]");
+  if (pk && !pk.disabled) {
+    var ps_ = parseInt(pk.getAttribute("data-hand-seat"), 10), pc = pk.getAttribute("data-pick");
+    var arr = setupDraft.hands[ps_], ix = arr.indexOf(pc);
+    if (ix >= 0) arr.splice(ix, 1);
+    else if (arr.length < 13 && pickedBy(pc) < 0) arr.push(pc);
+    redraw();
+    return;
+  }
+  var tc = e.target.closest && e.target.closest("[data-table-card]");
+  if (tc && !tc.disabled && !busy && !isAnimating() && state && state.table_turn) {
+    act("/api/play", { card: tc.getAttribute("data-table-card") });
+    return;
+  }
   var cardEl = e.target.closest(".card.legal");
   if (cardEl && !busy && !isAnimating() && state && state.human_turn) {
     playCard(cardEl.getAttribute("data-card"));
@@ -597,16 +748,53 @@ document.addEventListener("click", function (e) {
     case "cancel-setup":
       view = "auto"; lastKey = null; render(); break;
     case "deal":
+    case "hands-go":
       var sd = readSeed();
       if (!sd.ok) { localError = "Seed must be a whole number."; lastKey = null; render(); break; }
-      act("/api/new", {
+      var perr = null;
+      for (var q = 0; q < 4; q++) {
+        var kk = setupDraft.kinds[q], kinf = kindInfo(kk), pv = String(setupDraft.params[q] || paramDefault(kk)).trim();
+        if (kinf && kinf.param) {
+          setupDraft.params[q] = pv;
+          if (kk === "expert" && !(/^\d+$/.test(pv) && +pv >= 1 && +pv <= 200)) perr = "Expert id must be a whole number from 1 to 200 (seat " + SEAT_LABELS[q] + ").";
+          else if (kk === "personality" && !/^\d+$/.test(pv)) perr = "Personality seed must be a non-negative whole number (seat " + SEAT_LABELS[q] + ").";
+          else if (kk === "perilune" && pv !== "v5" && pv !== "v6.1") perr = "Perilune version must be v5 or v6.1.";
+        }
+      }
+      if (perr) { localError = perr; lastKey = null; render(); break; }
+      var body = {
         seats: [0, 1, 2, 3].map(function (s) {
-          return { kind: setupDraft.kinds[s], name: setupDraft.names[s].trim() || SEAT_LABELS[s] };
+          return { kind: seatKindString(s), name: setupDraft.names[s].trim() || SEAT_LABELS[s] };
         }),
         seed: sd.v,
         advisor_on: setupDraft.advisor
-      }, function () { view = "auto"; }, { fresh: true });
+      };
+      if (isRealSetup()) {
+        if (btn.getAttribute("data-act") === "deal") {
+          setupDraft.step = "hands"; localError = null; lastKey = null; render(); break;
+        }
+        var herr = null, seen = {}, hands = {};
+        for (var hs = 0; hs < 4; hs++) {
+          if (setupDraft.kinds[hs] === "table") continue;
+          var hh = setupDraft.hands[hs];
+          if (hh.length !== 13) { herr = SEAT_LABELS[hs] + " has " + hh.length + " cards; each seat needs exactly 13."; break; }
+          for (var hi = 0; hi < hh.length; hi++) {
+            if (seen[hh[hi]]) { herr = "The card " + cardLabel(hh[hi]) + " is in two hands."; break; }
+            seen[hh[hi]] = true;
+          }
+          if (herr) break;
+          hands[String(hs)] = hh.slice();
+        }
+        if (herr) { localError = herr; lastKey = null; render(); break; }
+        body.hands = hands;
+      }
+      act("/api/new", body, function () { view = "auto"; setupDraft.step = "seats"; }, { fresh: true });
       break;
+    case "hands-back": setupDraft.step = "seats"; localError = null; lastKey = null; render(); break;
+    case "clear-hand":
+      setupDraft.hands[parseInt(btn.getAttribute("data-seat"), 10)] = [];
+      lastKey = null; render(); break;
+
     case "reveal": act("/api/reveal", {}); break;
     case "undo": act("/api/undo", {}, null, { instant: true }); break;
     case "resume": act("/api/resume", {}, function () { view = "auto"; }, { instant: true }); break;
@@ -619,7 +807,13 @@ document.addEventListener("input", function (e) {
   if (!kind) return;
   var s = parseInt(t.getAttribute("data-seat"), 10);
   if (kind === "name") setupDraft.names[s] = t.value;
-  else if (kind === "kind") setupDraft.kinds[s] = t.value;
+  else if (kind === "kind") {
+    setupDraft.kinds[s] = t.value;
+    setupDraft.params[s] = paramDefault(t.value);
+    redraw(); /* the param input and the Deal button label depend on the kinds */
+    return;
+  }
+  else if (kind === "param") setupDraft.params[s] = t.value;
   else if (kind === "seed") setupDraft.seed = t.value;
   else if (kind === "advisor") setupDraft.advisor = t.checked;
   lastKey = null; // draft changed; next render must not be skipped, but we do not re-render now (keeps focus)
@@ -637,7 +831,27 @@ setInterval(function () {
   if (!state || MOCK) return;
   var showSetup = view === "setup" || state.phase === "setup";
   if (showSetup) return;
-  if (state.phase === "playing" && !state.human_turn) refresh();
+  if (state.phase === "playing" && !state.human_turn && !state.table_turn) refresh();
 }, 700);
 
+function loadKinds() {
+  if (MOCK) return Promise.resolve();
+  return fetch("/api/kinds", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j || !Array.isArray(j.kinds) || !j.kinds.length) return;
+    var list = j.kinds.map(function (k) {
+      return { kind: k.kind, label: k.kind === "search" ? "Candor (main bot)" : (k.label || k.kind), param: k.param || null };
+    });
+    var have = {};
+    list.forEach(function (k) { have[k.kind] = true; });
+    if (!have.table) {
+      var at = list.findIndex(function (k) { return k.kind === "human"; });
+      list.splice(at + 1, 0, { kind: "table", label: "Human at the table", param: null });
+    }
+    kinds = list;
+    lastKey = null;
+    render();
+  }).catch(function () { /* keep the built-in kinds */ });
+}
+
+loadKinds();
 refresh();

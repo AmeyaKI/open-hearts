@@ -233,3 +233,31 @@ h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing
   .hand .card { margin-left: -22px; }
   .card .rank { font-size: 22px; } .card .big { font-size: 34px; }
 }
+
+/* ---------- V1: kinds, real table ---------- */
+.setup-row .param { width: 5.5em; }
+.explain { font-size: 0.85rem; color: #55606b; margin: 0.5rem 0; line-height: 1.35; }
+.badge.kind-table { background: #b4531e; color: #fff; letter-spacing: 0.06em; }
+.btn.small { padding: 2px 8px; font-size: 0.8rem; }
+.pick-card { margin-bottom: 0.8rem; }
+.pick-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.4rem; }
+.pick-head .counter { margin-left: auto; font-weight: 700; font-variant-numeric: tabular-nums; color: #8a3b00; }
+.pick-head .counter.full { color: #1c7a3a; }
+.pickgrid { display: flex; flex-direction: column; gap: 4px; }
+.pickrow { display: flex; gap: 3px; align-items: center; flex-wrap: wrap; }
+.picksuit { width: 1.4em; font-size: 1.2rem; text-align: center; }
+.picksuit.red, .pick.red { color: #b3261e; }
+.picksuit.black, .pick.black { color: #1b1f24; }
+.pick { min-width: 2.7em; padding: 5px 4px; border: 1px solid #b9c0c8; border-radius: 5px; background: #fff; font: inherit; font-size: 0.9rem; cursor: pointer; }
+.pick:hover:not(:disabled) { background: #eef5ff; border-color: #4a7bd0; }
+.pick.sel { background: #cfe3ff; border-color: #2a5db0; font-weight: 700; }
+.pick.cand { border-color: #2a7a3a; box-shadow: 0 0 0 1px #2a7a3a inset; }
+.pick:disabled { opacity: 0.3; cursor: not-allowed; }
+.table-turn .hand-title { margin-bottom: 0.5rem; font-weight: 600; }
+.table-turn { background: rgba(255,255,255,0.92); border-radius: 8px; padding: 10px; }
+.announce-banner { background: #ffd24a; color: #3a2a00; font-size: 1.15rem; padding: 12px 16px; text-align: center; border-bottom: 3px solid #b88a00; animation: banner-in 0.25s ease-out; }
+.announce-banner .mini { font-size: 1.1em; }
+.seat.announce { box-shadow: 0 0 0 3px #ffd24a, 0 0 18px 4px rgba(255, 210, 74, 0.8); border-radius: 8px; }
+.foot .div.flash { background: #ffd24a; color: #3a2a00; padding: 0 6px; border-radius: 4px; animation: div-flash 1.5s ease-out; }
+@keyframes banner-in { from { transform: translateY(-100%); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes div-flash { 0%, 40% { background: #ff8a3a; } 100% { background: transparent; } }

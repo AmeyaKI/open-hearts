@@ -1,48 +1,167 @@
 {
   "phase": "playing",
   "seats": [
-    {"seat": 0, "kind": "human", "name": "You", "is_human": true},
-    {"seat": 1, "kind": "search", "name": "West", "is_human": false},
-    {"seat": 2, "kind": "search", "name": "North", "is_human": false},
-    {"seat": 3, "kind": "heuristic", "name": "East", "is_human": false}
+    {
+      "seat": 0,
+      "kind": "human",
+      "name": "You",
+      "is_human": true
+    },
+    {
+      "seat": 1,
+      "kind": "search",
+      "name": "West",
+      "is_human": false
+    },
+    {
+      "seat": 2,
+      "kind": "search",
+      "name": "North",
+      "is_human": false
+    },
+    {
+      "seat": 3,
+      "kind": "heuristic",
+      "name": "East",
+      "is_human": false
+    }
   ],
   "to_play": 0,
   "human_turn": true,
   "revealed": true,
   "trick_number": 4,
   "hearts_broken": true,
-  "scores": [0, 0, 1, 1],
-  "current_trick": [{"seat": 3, "card": "Qd"}],
+  "scores": [
+    0,
+    0,
+    1,
+    1
+  ],
+  "current_trick": [
+    {
+      "seat": 3,
+      "card": "Qd"
+    }
+  ],
   "last_trick": {
     "plays": [
-      {"seat": 2, "card": "6d"},
-      {"seat": 3, "card": "Jd"},
-      {"seat": 0, "card": "3d"},
-      {"seat": 1, "card": "4h"}
+      {
+        "seat": 2,
+        "card": "6d"
+      },
+      {
+        "seat": 3,
+        "card": "Jd"
+      },
+      {
+        "seat": 0,
+        "card": "3d"
+      },
+      {
+        "seat": 1,
+        "card": "4h"
+      }
     ],
     "winner": 3,
     "points": 1
   },
   "history": [
-    {"seat": 0, "card": "2c", "trick": 0},
-    {"seat": 1, "card": "5c", "trick": 0},
-    {"seat": 2, "card": "Kc", "trick": 0},
-    {"seat": 3, "card": "3c", "trick": 0},
-    {"seat": 2, "card": "4d", "trick": 1},
-    {"seat": 3, "card": "9d", "trick": 1},
-    {"seat": 0, "card": "2d", "trick": 1},
-    {"seat": 1, "card": "Td", "trick": 1},
-    {"seat": 1, "card": "7c", "trick": 2},
-    {"seat": 2, "card": "Ac", "trick": 2},
-    {"seat": 3, "card": "8h", "trick": 2},
-    {"seat": 0, "card": "6c", "trick": 2},
-    {"seat": 2, "card": "6d", "trick": 3},
-    {"seat": 3, "card": "Jd", "trick": 3},
-    {"seat": 0, "card": "3d", "trick": 3},
-    {"seat": 1, "card": "4h", "trick": 3}
+    {
+      "seat": 0,
+      "card": "2c",
+      "trick": 0
+    },
+    {
+      "seat": 1,
+      "card": "5c",
+      "trick": 0
+    },
+    {
+      "seat": 2,
+      "card": "Kc",
+      "trick": 0
+    },
+    {
+      "seat": 3,
+      "card": "3c",
+      "trick": 0
+    },
+    {
+      "seat": 2,
+      "card": "4d",
+      "trick": 1
+    },
+    {
+      "seat": 3,
+      "card": "9d",
+      "trick": 1
+    },
+    {
+      "seat": 0,
+      "card": "2d",
+      "trick": 1
+    },
+    {
+      "seat": 1,
+      "card": "Td",
+      "trick": 1
+    },
+    {
+      "seat": 1,
+      "card": "7c",
+      "trick": 2
+    },
+    {
+      "seat": 2,
+      "card": "Ac",
+      "trick": 2
+    },
+    {
+      "seat": 3,
+      "card": "8h",
+      "trick": 2
+    },
+    {
+      "seat": 0,
+      "card": "6c",
+      "trick": 2
+    },
+    {
+      "seat": 2,
+      "card": "6d",
+      "trick": 3
+    },
+    {
+      "seat": 3,
+      "card": "Jd",
+      "trick": 3
+    },
+    {
+      "seat": 0,
+      "card": "3d",
+      "trick": 3
+    },
+    {
+      "seat": 1,
+      "card": "4h",
+      "trick": 3
+    }
   ],
-  "hand": ["4c", "9c", "Tc", "7d", "Kd", "3s", "Js", "2h", "Ah"],
-  "legal": ["7d", "Kd"],
+  "hand": [
+    "4c",
+    "9c",
+    "Tc",
+    "7d",
+    "Kd",
+    "3s",
+    "Js",
+    "2h",
+    "Ah"
+  ],
+  "legal": [
+    "7d",
+    "Kd"
+  ],
   "illegal_reasons": {
     "4c": "must follow diamonds",
     "9c": "must follow diamonds",
@@ -56,46 +175,173 @@
   "advice": {
     "suggested": "7d",
     "candidates": [
-      {"card": "7d", "mean_points": 1.12},
-      {"card": "Kd", "mean_points": 1.85}
+      {
+        "card": "7d",
+        "mean_points": 1.12
+      },
+      {
+        "card": "Kd",
+        "mean_points": 1.85
+      }
     ],
     "worlds": "50x20",
     "latency_s": 0.031,
     "belief": {
       "opponents": [
-        {"seat": 1, "name": "West"},
-        {"seat": 2, "name": "North"},
-        {"seat": 3, "name": "East"}
+        {
+          "seat": 1,
+          "name": "West"
+        },
+        {
+          "seat": 2,
+          "name": "North"
+        },
+        {
+          "seat": 3,
+          "name": "East"
+        }
       ],
       "cards": {
-        "8c": [0.5, 0.5, 0.0],
-        "Jc": [0.5, 0.5, 0.0],
-        "Qc": [0.4, 0.6, 0.0],
-        "5d": [0.0, 0.5, 0.5],
-        "8d": [0.0, 0.45, 0.55],
-        "Ad": [0.0, 0.6, 0.4],
-        "2s": [0.3, 0.4, 0.3],
-        "4s": [0.35, 0.35, 0.3],
-        "5s": [0.3, 0.3, 0.4],
-        "6s": [0.4, 0.3, 0.3],
-        "7s": [0.3, 0.35, 0.35],
-        "8s": [0.33, 0.34, 0.33],
-        "9s": [0.2, 0.4, 0.4],
-        "Ts": [0.4, 0.3, 0.3],
-        "Qs": [0.62, 0.18, 0.2],
-        "Ks": [0.3, 0.5, 0.2],
-        "As": [0.2, 0.3, 0.5],
-        "3h": [0.3, 0.3, 0.4],
-        "5h": [0.4, 0.3, 0.3],
-        "6h": [0.3, 0.4, 0.3],
-        "7h": [0.35, 0.35, 0.3],
-        "9h": [0.3, 0.3, 0.4],
-        "Th": [0.5, 0.25, 0.25],
-        "Jh": [0.25, 0.5, 0.25],
-        "Qh": [0.3, 0.3, 0.4],
-        "Kh": [0.2, 0.4, 0.4]
+        "8c": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "Jc": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "Qc": [
+          0.4,
+          0.6,
+          0.0
+        ],
+        "5d": [
+          0.0,
+          0.5,
+          0.5
+        ],
+        "8d": [
+          0.0,
+          0.45,
+          0.55
+        ],
+        "Ad": [
+          0.0,
+          0.6,
+          0.4
+        ],
+        "2s": [
+          0.3,
+          0.4,
+          0.3
+        ],
+        "4s": [
+          0.35,
+          0.35,
+          0.3
+        ],
+        "5s": [
+          0.3,
+          0.3,
+          0.4
+        ],
+        "6s": [
+          0.4,
+          0.3,
+          0.3
+        ],
+        "7s": [
+          0.3,
+          0.35,
+          0.35
+        ],
+        "8s": [
+          0.33,
+          0.34,
+          0.33
+        ],
+        "9s": [
+          0.2,
+          0.4,
+          0.4
+        ],
+        "Ts": [
+          0.4,
+          0.3,
+          0.3
+        ],
+        "Qs": [
+          0.62,
+          0.18,
+          0.2
+        ],
+        "Ks": [
+          0.3,
+          0.5,
+          0.2
+        ],
+        "As": [
+          0.2,
+          0.3,
+          0.5
+        ],
+        "3h": [
+          0.3,
+          0.3,
+          0.4
+        ],
+        "5h": [
+          0.4,
+          0.3,
+          0.3
+        ],
+        "6h": [
+          0.3,
+          0.4,
+          0.3
+        ],
+        "7h": [
+          0.35,
+          0.35,
+          0.3
+        ],
+        "9h": [
+          0.3,
+          0.3,
+          0.4
+        ],
+        "Th": [
+          0.5,
+          0.25,
+          0.25
+        ],
+        "Jh": [
+          0.25,
+          0.5,
+          0.25
+        ],
+        "Qh": [
+          0.3,
+          0.3,
+          0.4
+        ],
+        "Kh": [
+          0.2,
+          0.4,
+          0.4
+        ]
       },
-      "voids": [["d"], [], ["c"]]
+      "voids": [
+        [
+          "d"
+        ],
+        [],
+        [
+          "c"
+        ]
+      ]
     },
     "sentences": [
       "West showed a void in diamonds on trick 4, so every unseen diamond is with North or East.",
@@ -108,5 +354,10 @@
   "seed": 12345,
   "log_path": "results/live/table_records.txt",
   "latency_budget_s": 3.0,
-  "error": null
+  "error": null,
+  "mode": "virtual",
+  "table_turn": false,
+  "candidates": [],
+  "announce": null,
+  "divergences": 1
 }

@@ -297,3 +297,114 @@ def test_seed_determinism(tmp_path):
         finally:
             _stop(httpd, t)
     assert out[0] == out[1]
+
+
+# ------------------------------------------------------------------ V1: kinds, real table, divergence
+import numpy as np  # noqa: E402
+
+from openhearts.engine import cards as _cards  # noqa: E402
+from openhearts.engine.game import deal as _deal  # noqa: E402
+
+
+def test_kinds_endpoint_lists_contract_kinds_and_never_heldout_experts(api):
+    kinds = api.get("/api/kinds")["kinds"]
+    names = [k["kind"] for k in kinds]
+    for k in ("human", "table", "search", "heuristic", "random", "expert", "personality"):
+        assert k in names
+    expert = next(k for k in kinds if k["kind"] == "expert")
+    assert expert["param"] == "id 1-200"
+    assert any("Candor" in k["label"] for k in kinds)
+    for bad in ("expert:201", "expert:250", "expert:0", "personality:-3", "perilune:v9", "wizard"):
+        api.post_expect_400("/api/new", {"seats": seats("human", bad, "random", "random"), "seed": 1})
+
+
+def test_expert_and_personality_bots_play_a_full_hand(api):
+    st = new_hand(api, ["human", "expert:17", "personality:4242", "heuristic"], 21)
+    st = play_until_over(api, st)
+    assert sum(st["scores"]) == 26 and st["mode"] == "virtual"
+
+
+def test_divergence_log_counts_plays_against_the_advice(started):
+    api, results_dir = started
+    st = new_hand(api, ["human", "heuristic", "heuristic", "heuristic"], 7, advisor_on=True)
+    n = 0
+    while st["phase"] == "playing":
+        adv = st["advice"]
+        others = [c for c in st["legal"] if c != adv["suggested"]]
+        card = others[0] if others else st["legal"][0]
+        n += 1 if others else 0
+        st = api.post("/api/play", {"card": card})
+    assert st["divergences"] == n > 0
+    lines = (results_dir / "table_divergence.txt").read_text().splitlines()
+    assert len(lines) == n
+    hand_id, seed, seat, trick, sugg, played, m1, m2 = lines[0].split()
+    assert int(seed) == 7 and seat == "0" and sugg != played and 1 <= int(trick) <= 13
+
+
+def _real_setup(table_seat=1, seed=3):
+    d = _deal(np.random.default_rng(seed))
+    hands = {str(s): [_cards.card_name(c) for c in _cards.cards_in(d.hands[s])]
+             for s in range(4) if s != table_seat}
+    truth = [_cards.card_name(c) for c in _cards.cards_in(d.hands[table_seat])]
+    return hands, truth
+
+
+def _table_play(api, st, truth):
+    """Transcribe a truly legal card for the table seat (follow suit when it can)."""
+    played = {h["card"] for h in st["history"]} | {p["card"] for p in st["current_trick"]}
+    held = [c for c in truth if c not in played]
+    led = st["current_trick"][0]["card"][1] if st["current_trick"] else None
+    follow = [c for c in held if c[1] == led] if led else []
+    pool = follow or [c for c in held if c in st["candidates"]]
+    assert pool, "the true hand always has a candidate"
+    return api.post("/api/play", {"card": pool[0]})
+
+
+def test_real_table_seat_is_transcribed_and_the_record_reconstructs_every_hand(started):
+    api, results_dir = started
+    hands, truth = _real_setup()
+    sts = seats("human", "table", "search", "heuristic")
+    api.post_expect_400("/api/new", {"seats": sts, "seed": 3})                    # hands missing
+    short = dict(hands); short["0"] = short["0"][:12]
+    api.post_expect_400("/api/new", {"seats": sts, "seed": 3, "hands": short})    # 12 cards
+    st = api.post("/api/new", {"seats": sts, "seed": 3, "hands": hands, "advisor_on": True})
+    assert st["mode"] == "real" and st["phase"] == "playing"
+    assert (not st["seats"][1]["is_human"]) and st["seats"][1]["kind"] == "table"
+    saw_table_turn = saw_announce = False
+    while st["phase"] == "playing":
+        if st["table_turn"]:
+            saw_table_turn = True
+            assert st["hand"] is None and st["legal"] == [] and st["advice"] is None
+            assert not st["human_turn"]
+            assert all(c not in hands["0"] + hands["2"] + hands["3"] for c in st["candidates"])
+            api.post_expect_400("/api/play", {"card": hands["0"][0]})     # a known seat's card
+            st = _table_play(api, st, truth)
+        else:
+            assert st["human_turn"] and st["to_play"] == 0
+            if st["announce"]:
+                saw_announce = True
+                assert st["announce"]["seat"] in (2, 3)
+            st = play_first_legal(api, st)
+    assert saw_table_turn and saw_announce and sum(st["scores"]) == 26
+    rec = from_line((results_dir / "table_records.txt").read_text().splitlines()[-1])
+    assert all(bin(h).count("1") == 13 for h in rec.hands)
+    assert sorted(_cards.card_name(c) for c in _cards.cards_in(rec.hands[1])) == sorted(truth)
+
+
+def test_real_table_resume_mid_hand(tmp_path):
+    hands, truth = _real_setup()
+    httpd, t = _start(tmp_path)
+    api = Client(httpd)
+    st = api.post("/api/new", {"seats": seats("human", "table", "search", "heuristic"),
+                               "seed": 3, "hands": hands})
+    for _ in range(6):
+        st = _table_play(api, st, truth) if st["table_turn"] else play_first_legal(api, st)
+    _stop(httpd, t)
+    httpd2, t2 = _start(tmp_path)
+    try:
+        st2 = Client(httpd2).post("/api/resume", {})
+        for k in ("mode", "history", "current_trick", "scores", "trick_number", "to_play",
+                  "hand", "candidates", "table_turn", "seed", "hand_id"):
+            assert st2[k] == st[k], k
+    finally:
+        _stop(httpd2, t2)

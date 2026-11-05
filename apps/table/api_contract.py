@@ -32,7 +32,8 @@ STATE OBJECT (GET /api/state):
   "phase": "setup" | "playing" | "over",
   "seats": [{"seat": 0, "kind": "human", "name": "You", "is_human": true}, ...4],
   "to_play": 0..3 | null,                 # null when over or in setup
-  "human_turn": bool,                      # true iff phase=playing and seats[to_play] is human
+  "human_turn": bool,                      # true iff phase=playing and seats[to_play] is a KEYBOARD
+                                           # human (kind "human"); false on a "table" seat's turn
   "revealed": bool,                        # hot-seat reveal state for the current human turn
   "trick_number": 0..13,                   # completed tricks
   "hearts_broken": bool,
@@ -70,8 +71,55 @@ SEAT_KINDS: "human" (at the keyboard), "search" (the shipped bot, honest-FULL 50
 DEFAULT for bot seats), "heuristic" (our beginner rulebook player), "random" (uniform legal).
 Later (not V0): "table" (human at a real table, transcribed), "personality:<id>", "perilune".
 """
-SEAT_KINDS = ("human", "search", "heuristic", "random")
+SEAT_KINDS = ("human", "table", "search", "heuristic", "random")   # plain kinds
+PARAM_KINDS = ("expert", "personality", "perilune")                  # "kind:param"
+BOT_NAME = "Candor"                                                   # the main bot's product name
 DEFAULT_BOT = "search"
 SEAT_LABELS = {0: "South", 1: "West", 2: "North", 3: "East"}
 CARD_RANKS = "23456789TJQKA"
 CARD_SUITS = "cdsh"
+
+# ---------------------------------------------------------------------------------------
+# V1 ADDITIONS (2026-11-04): real-table seats, more bot kinds, divergence log.
+#
+# SEAT KINDS (string `kind`):
+#   "human"            a person at this keyboard (hand dealt by the server in virtual mode,
+#                      typed in by the person in real mode)
+#   "table"            a person at a REAL table: the server never knows this hand; their plays
+#                      are transcribed (clicked from the candidate list) as they happen
+#   "search"           Candor, the main bot (honest-FULL 50x20 fused)  -- DEFAULT bot
+#   "heuristic"        the beginner rulebook player
+#   "random"           uniform over legal cards
+#   "expert:<id>"      Phase-7 expert rulebook player, id 1..200 (training pool ONLY; the
+#                      held-out ids 201..250 are never offered)
+#   "personality:<n>"  Phase-5 personality player drawn from seed n (any non-negative int)
+#   "perilune:v5" / "perilune:v6.1"   Perilune's raw networks (offered only when their
+#                      weights are installed; see experiments/perilune/adapter.py)
+#   GET /api/kinds -> {"kinds": [{"kind": "search", "label": "Candor (main bot)"}, ...]}
+#   lists what this server can seat, in display order, with parametric kinds given once as
+#   {"kind": "expert", "label": "Expert bot", "param": "id 1-200"} etc.
+#
+# MODES. mode = "virtual" (no "table" seat: the server deals) or "real" (at least one "table"
+# seat: a physical deck was dealt). In REAL mode POST /api/new must also carry
+#   "hands": {"0": ["2c", ...13 cards], "2": [...]}   for EVERY non-table seat
+# (keyboard humans and bots); 13 cards each, no duplicates, and the server rejects a set that
+# conflicts. Optional "leader": seat index, needed only when several table seats exist and
+# no known hand holds 2c (with one table seat the leader is inferred). The state gains:
+#   "mode": "virtual" | "real"
+#   "table_turn": bool            true when the seat to play is a "table" seat
+#   "candidates": ["3c", ...]     in real mode on a table seat's turn: every card that could
+#                                 legally be the play (not yet played, not in a known hand,
+#                                 and obeying the lead rules) -- the WIDEST legal set, so a true
+#                                 play is never rejected for a reason the server cannot see
+#   "announce": null | {"seat": s, "card": c, "name": n}
+#                                 in real mode, the last BOT play: the person running the
+#                                 table plays that card physically for the bot
+# POST /api/play {"card": c} on a table seat's turn records that seat's physical play.
+# Bots in real mode play automatically from their typed hand (announced), exactly as in
+# virtual mode. Undo/resume/log work in both modes; the finished-hand record reconstructs
+# every seat's 13 cards from its plays (no passing, so the union of plays IS the hand).
+#
+# DIVERGENCE LOG. When a keyboard human plays a card different from the advisor's suggestion,
+# one line is appended to <results_dir>/table_divergence.txt:
+#   hand_id seed seat trick suggested played mean_suggested mean_played
+# and state carries "divergences": int (count this hand).
