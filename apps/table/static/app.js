@@ -9,7 +9,7 @@ var SEAT_POS = ["bottom", "left", "top", "right"];
 var FALLBACK_KINDS = [
   { kind: "human", label: "Human" },
   { kind: "table", label: "Human at the table" },
-  { kind: "search", label: "Candor (main bot)" },
+  { kind: "search", label: "TallyHearts (main bot)" },
   { kind: "heuristic", label: "Heuristic bot" },
   { kind: "random", label: "Random bot" }
 ];
@@ -839,7 +839,7 @@ function loadKinds() {
   return fetch("/api/kinds", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
     if (!j || !Array.isArray(j.kinds) || !j.kinds.length) return;
     var list = j.kinds.map(function (k) {
-      return { kind: k.kind, label: k.kind === "search" ? "Candor (main bot)" : (k.label || k.kind), param: k.param || null };
+      return { kind: k.kind, label: k.kind === "search" ? "TallyHearts (main bot)" : (k.label || k.kind), param: k.param || null };
     });
     var have = {};
     list.forEach(function (k) { have[k.kind] = true; });

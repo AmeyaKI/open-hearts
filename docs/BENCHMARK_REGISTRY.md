@@ -24,6 +24,8 @@ no shoot-the-moon rescoring). Points are per seat-hand, lower is better; a 4-sea
 
 ## Our own bot versions
 
+Product name (2026-11-06): **TallyHearts** = the shipped honest-FULL 50×20 fused bot below; the code and row names are unchanged.
+
 | Version | Settings | Cost (s/decision, 12-worker contended unless noted) | Status |
 |---|---|---|---|
 | **honest-FULL 50×20 fused** (shipped) | exact belief table (Level.FULL), 50 outer worlds × 20 inner re-determinizations, fused kernel (bitwise-gated), grouping off, no posterior reading | 0.026–0.027 | shipped since Phase 6; exploitability +0.198 (+0.068, +0.327) champion-side, minor leak |

@@ -55,7 +55,7 @@ python -m pytest -q                      # full suite
 OPENHEARTS_NO_JIT=1 python -m pytest -q  # same suite on the pure-Python reference paths
 ```
 
-Play against it in your browser -- any mix of humans and bots at one table, with the bot's
+The bot is called **TallyHearts**. Play against it in your browser -- any mix of humans and bots at one table, with the bot's
 suggested card, its per-card point estimates and the belief heat-map it is working from:
 
 ```bash

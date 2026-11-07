@@ -73,7 +73,7 @@ Later (not V0): "table" (human at a real table, transcribed), "personality:<id>"
 """
 SEAT_KINDS = ("human", "table", "search", "heuristic", "random")   # plain kinds
 PARAM_KINDS = ("expert", "personality", "perilune")                  # "kind:param"
-BOT_NAME = "Candor"                                                   # the main bot's product name
+BOT_NAME = "TallyHearts"                                                 # the main bot's product name
 DEFAULT_BOT = "search"
 SEAT_LABELS = {0: "South", 1: "West", 2: "North", 3: "East"}
 CARD_RANKS = "23456789TJQKA"
@@ -87,7 +87,7 @@ CARD_SUITS = "cdsh"
 #                      typed in by the person in real mode)
 #   "table"            a person at a REAL table: the server never knows this hand; their plays
 #                      are transcribed (clicked from the candidate list) as they happen
-#   "search"           Candor, the main bot (honest-FULL 50x20 fused)  -- DEFAULT bot
+#   "search"           TallyHearts, the main bot (honest-FULL 50x20 fused)  -- DEFAULT bot
 #   "heuristic"        the beginner rulebook player
 #   "random"           uniform over legal cards
 #   "expert:<id>"      Phase-7 expert rulebook player, id 1..200 (training pool ONLY; the
@@ -95,7 +95,7 @@ CARD_SUITS = "cdsh"
 #   "personality:<n>"  Phase-5 personality player drawn from seed n (any non-negative int)
 #   "perilune:v5" / "perilune:v6.1"   Perilune's raw networks (offered only when their
 #                      weights are installed; see experiments/perilune/adapter.py)
-#   GET /api/kinds -> {"kinds": [{"kind": "search", "label": "Candor (main bot)"}, ...]}
+#   GET /api/kinds -> {"kinds": [{"kind": "search", "label": "TallyHearts (main bot)"}, ...]}
 #   lists what this server can seat, in display order, with parametric kinds given once as
 #   {"kind": "expert", "label": "Expert bot", "param": "id 1-200"} etc.
 #

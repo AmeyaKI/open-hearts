@@ -313,7 +313,7 @@ def test_kinds_endpoint_lists_contract_kinds_and_never_heldout_experts(api):
         assert k in names
     expert = next(k for k in kinds if k["kind"] == "expert")
     assert expert["param"] == "id 1-200"
-    assert any("Candor" in k["label"] for k in kinds)
+    assert any("TallyHearts" in k["label"] for k in kinds)
     for bad in ("expert:201", "expert:250", "expert:0", "personality:-3", "perilune:v9", "wizard"):
         api.post_expect_400("/api/new", {"seats": seats("human", bad, "random", "random"), "seed": 1})
 
