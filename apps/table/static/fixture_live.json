@@ -1,0 +1,180 @@
+{
+  "phase": "playing",
+  "seats": [
+    {
+      "seat": 0,
+      "kind": "human",
+      "name": "You",
+      "is_human": true,
+      "advisor": true
+    },
+    {
+      "seat": 1,
+      "kind": "table",
+      "name": "West",
+      "is_human": true,
+      "advisor": false
+    },
+    {
+      "seat": 2,
+      "kind": "table",
+      "name": "North",
+      "is_human": true,
+      "advisor": false
+    },
+    {
+      "seat": 3,
+      "kind": "table",
+      "name": "East",
+      "is_human": true,
+      "advisor": false
+    }
+  ],
+  "to_play": 1,
+  "human_turn": false,
+  "revealed": false,
+  "trick_number": 4,
+  "hearts_broken": true,
+  "scores": [
+    0,
+    0,
+    1,
+    1
+  ],
+  "current_trick": [
+    {
+      "seat": 0,
+      "card": "4c"
+    }
+  ],
+  "last_trick": {
+    "plays": [
+      {
+        "seat": 2,
+        "card": "6d"
+      },
+      {
+        "seat": 3,
+        "card": "Jd"
+      },
+      {
+        "seat": 0,
+        "card": "3d"
+      },
+      {
+        "seat": 1,
+        "card": "4h"
+      }
+    ],
+    "winner": 3,
+    "points": 1
+  },
+  "history": [
+    {
+      "seat": 0,
+      "card": "2c",
+      "trick": 0
+    },
+    {
+      "seat": 1,
+      "card": "5c",
+      "trick": 0
+    },
+    {
+      "seat": 2,
+      "card": "Kc",
+      "trick": 0
+    },
+    {
+      "seat": 3,
+      "card": "3c",
+      "trick": 0
+    },
+    {
+      "seat": 2,
+      "card": "4d",
+      "trick": 1
+    },
+    {
+      "seat": 3,
+      "card": "9d",
+      "trick": 1
+    },
+    {
+      "seat": 0,
+      "card": "2d",
+      "trick": 1
+    },
+    {
+      "seat": 1,
+      "card": "Td",
+      "trick": 1
+    },
+    {
+      "seat": 1,
+      "card": "7c",
+      "trick": 2
+    },
+    {
+      "seat": 2,
+      "card": "Ac",
+      "trick": 2
+    },
+    {
+      "seat": 3,
+      "card": "8h",
+      "trick": 2
+    },
+    {
+      "seat": 0,
+      "card": "6c",
+      "trick": 2
+    },
+    {
+      "seat": 2,
+      "card": "6d",
+      "trick": 3
+    },
+    {
+      "seat": 3,
+      "card": "Jd",
+      "trick": 3
+    },
+    {
+      "seat": 0,
+      "card": "3d",
+      "trick": 3
+    },
+    {
+      "seat": 1,
+      "card": "4h",
+      "trick": 3
+    }
+  ],
+  "hand": null,
+  "legal": [],
+  "illegal_reasons": {},
+  "advisor_on": true,
+  "advice": null,
+  "hand_id": 7,
+  "seed": 12345,
+  "log_path": "results/live/table_records.txt",
+  "latency_budget_s": 3.0,
+  "error": null,
+  "mode": "real",
+  "table_turn": true,
+  "candidates": [
+    "2c",
+    "3c",
+    "5c",
+    "6c",
+    "7c",
+    "8c",
+    "9c",
+    "Jc",
+    "Qc",
+    "Ac"
+  ],
+  "announce": null,
+  "divergences": 0
+}

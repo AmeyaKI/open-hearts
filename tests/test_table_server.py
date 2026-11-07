@@ -408,3 +408,38 @@ def test_real_table_resume_mid_hand(tmp_path):
             assert st2[k] == st[k], k
     finally:
         _stop(httpd2, t2)
+
+
+# ------------------------------------------------------------------ V2: per-seat coaching, leader
+def test_coaching_is_per_seat_and_off_by_default_for_other_humans(api):
+    st = api.post("/api/new", {"seats": [{"kind": "human", "name": "A"}, {"kind": "human", "name": "B"},
+                                         {"kind": "random", "name": "R1"}, {"kind": "random", "name": "R2"}],
+                               "seed": 5, "advisor_on": True})
+    assert [s["advisor"] for s in st["seats"]] == [True, False, False, False]
+    seen = {0: None, 1: None}
+    for _ in range(8):
+        if st["phase"] != "playing":
+            break
+        if not st["revealed"]:
+            st = api.post("/api/reveal", {})
+        seen[st["to_play"]] = st["advice"] is not None
+        st = api.post("/api/play", {"card": st["legal"][0]})
+    assert seen[0] is True and seen[1] is False
+    st = api.post("/api/advisor", {"seat": 1, "on": True})
+    assert st["seats"][1]["advisor"] is True
+    api.post_expect_400("/api/advisor", {"seat": 7, "on": True})
+
+
+def test_live_table_needs_a_leader_when_no_known_hand_holds_2c(api):
+    d = _deal(np.random.default_rng(3))                       # seed 3: North (seat 2) holds 2c
+    mine = [_cards.card_name(c) for c in _cards.cards_in(d.hands[0])]
+    sts = seats("human", "table", "table", "table")
+    api.post_expect_400("/api/new", {"seats": sts, "seed": 3, "hands": {"0": mine}})
+    st = api.post("/api/new", {"seats": sts, "seed": 3, "hands": {"0": mine}, "leader": 2,
+                               "advisor_on": True})
+    assert st["mode"] == "real" and st["to_play"] == 2 and st["table_turn"]
+    assert "2c" in st["candidates"] and len(st["candidates"]) == 1       # 2c must lead
+    st = api.post("/api/play", {"card": "2c"})
+    assert st["to_play"] == 3 and st["table_turn"]
+    st = api.post("/api/play", {"card": st["candidates"][0]})
+    assert st["to_play"] == 0 and st["human_turn"] and st["advice"] is not None   # the owner is coached

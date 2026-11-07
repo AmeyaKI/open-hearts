@@ -216,11 +216,11 @@ h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing
 .foot { margin-top: 14px; font-size: 11px; color: var(--muted); text-align: center; }
 
 /* setup */
-.setup { max-width: 560px; margin: 40px auto; text-align: center; }
+.setup { max-width: 640px; margin: 40px auto; text-align: center; }
 .setup .sub { color: var(--muted); margin-top: 4px; }
 .setup-card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; text-align: left; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1); }
-.setup-row { display: grid; grid-template-columns: 70px 1fr 190px; gap: 10px; align-items: center; margin-bottom: 10px; }
-.setup-row input[data-setup="seed"] { grid-column: 2 / 4; }
+.setup-row { display: grid; grid-template-columns: 70px 1fr 190px auto; gap: 10px; align-items: center; margin-bottom: 10px; }
+.setup-row input[data-setup="seed"] { grid-column: 2 / 5; }
 .seat-tag { font-weight: 600; font-size: 13px; color: var(--muted); }
 .setup input[type="text"], .setup select { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; background: #fff; width: 100%; }
 .check { display: block; margin: 6px 0 14px; font-size: 14px; }
@@ -261,3 +261,44 @@ h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing
 .foot .div.flash { background: #ffd24a; color: #3a2a00; padding: 0 6px; border-radius: 4px; animation: div-flash 1.5s ease-out; }
 @keyframes banner-in { from { transform: translateY(-100%); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes div-flash { 0%, 40% { background: #ff8a3a; } 100% { background: transparent; } }
+
+/* ---------- V2: presets, coach, live table, status strip ---------- */
+.presets { display: flex; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.btn.preset.on { background: var(--felt); color: #fff; border-color: var(--felt-edge); font-weight: 600; }
+.preset-text { margin-top: 0; min-height: 2.6em; }
+.coach { font-size: 13px; white-space: nowrap; min-width: 4.8em; }
+.leader-card { margin-bottom: 0.8rem; }
+.leader-card select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: #fff; margin-left: 6px; }
+.leader-auto { color: #1c7a3a; font-weight: 600; }
+
+.status-strip {
+  margin: 0 0 12px; padding: 10px 16px; border-radius: 10px; font-size: 18px; font-weight: 600;
+  background: #fff; border: 1px solid var(--line); border-left: 8px solid #8aa6b8; min-height: 46px;
+}
+.status-strip.wait { border-left-color: #b4531e; background: #fff4e8; }
+.status-strip.you { border-left-color: var(--felt); background: #e6f4ec; }
+.status-strip.hidden { border-left-color: #1d4f8c; background: #e8f0fa; }
+.status-strip.trick { border-left-color: var(--gold); background: #fff8e1; }
+.status-strip.over { border-left-color: var(--red); }
+.status-strip .red { color: var(--red); } .status-strip .black { color: #111; }
+
+.seat-count { font-size: 12px; opacity: 0.85; margin-top: 2px; }
+
+.table-turn { color: var(--ink); }
+.entry-prompt { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+.entry { display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; margin: 8px 0; }
+.entry-input {
+  font: inherit; font-size: 26px; width: 10em; max-width: 100%; padding: 8px 12px; border: 2px solid #2a5db0; border-radius: 9px;
+  background: #fff; color: var(--ink); text-align: center;
+}
+.entry-input:focus { outline: 3px solid rgba(42, 93, 176, 0.35); }
+.entry-input::placeholder { font-size: 13px; color: var(--muted); }
+.entry-msg { flex-basis: 100%; min-height: 1.3em; font-size: 13px; color: #b3261e; text-align: center; }
+.hand-wrap .entry { margin-top: 2px; }
+.hand-wrap:not(.table-turn) .entry-input { font-size: 18px; width: 13em; }
+.entry-undo { margin: 8px 0 0; font-size: 12px; }
+
+.suggest-big { display: flex; align-items: center; gap: 14px; margin: 4px 0 10px; }
+.suggest-big .card { --card-w: 96px; --card-h: 136px; }
+.suggest-big .card .rank { font-size: 34px; } .suggest-big .card .pip { font-size: 24px; } .suggest-big .card .big { font-size: 52px; }
+.suggest-note { font-size: 14px; color: var(--muted); line-height: 1.5; }

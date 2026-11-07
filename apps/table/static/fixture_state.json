@@ -5,25 +5,29 @@
       "seat": 0,
       "kind": "human",
       "name": "You",
-      "is_human": true
+      "is_human": true,
+      "advisor": true
     },
     {
       "seat": 1,
       "kind": "search",
       "name": "West",
-      "is_human": false
+      "is_human": false,
+      "advisor": false
     },
     {
       "seat": 2,
       "kind": "search",
       "name": "North",
-      "is_human": false
+      "is_human": false,
+      "advisor": false
     },
     {
       "seat": 3,
       "kind": "heuristic",
       "name": "East",
-      "is_human": false
+      "is_human": false,
+      "advisor": false
     }
   ],
   "to_play": 0,

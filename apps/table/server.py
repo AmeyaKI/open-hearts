@@ -300,8 +300,11 @@ class Table:
             kind = str(s.get("kind", DEFAULT_BOT))
             parse_kind(kind)                                    # raises on a bad kind
             name = str(s.get("name") or SEAT_LABELS[i])[:24]
+            adv = s.get("advisor")
+            if adv is None:
+                adv = (i == 0)                              # coach seat 0 by default, nobody else
             cfg.append({"seat": i, "kind": kind, "name": name,
-                        "is_human": kind in ("human", "table")})
+                        "is_human": kind in ("human", "table"), "advisor": bool(adv)})
         table_seats = {i for i, s in enumerate(cfg) if s["kind"] == "table"}
         self.seats = cfg
         self.seed = int(seed) if seed is not None else int(np.random.SeedSequence().entropy % (1 << 31))
@@ -395,7 +398,7 @@ class Table:
     def _log_divergence(self, seat, card):
         """Keyboard human played against the advice that was on screen -> one log line."""
         adv = self._advice_cache
-        if not self.advisor_on or adv is None or adv["suggested"] == card_str(card):
+        if not self.coached(seat) or adv is None or adv["suggested"] == card_str(card):
             return
         means = {c["card"]: c["mean_points"] for c in adv["candidates"]}
         with open(self.divergence_path, "a") as f:
@@ -416,9 +419,18 @@ class Table:
         self._advice_cache = None
         self._autosave()
 
-    def set_advisor(self, on: bool):
-        self.advisor_on = bool(on)
+    def set_advisor(self, on: bool, seat=None):
+        if seat is None:
+            self.advisor_on = bool(on)
+        else:
+            seat = int(seat)
+            if not 0 <= seat < 4:
+                raise ValueError("seat must be 0-3")
+            self.seats[seat]["advisor"] = bool(on)
         self._advice_cache = None
+
+    def coached(self, seat) -> bool:
+        return self.advisor_on and bool(self.seats[seat].get("advisor", seat == 0))
 
     # ------------------------------------------------------------ snapshots / persistence
     def _rng_states(self):
@@ -488,7 +500,7 @@ class Table:
             raise ValueError("nothing to resume")
         with open(self.resume_path) as f:
             doc = json.load(f)
-        self.seats = doc["seats"]
+        self.seats = [dict(x, advisor=x.get("advisor", x["seat"] == 0)) for x in doc["seats"]]
         self.seed, self.hand_id, self.advisor_on = doc["seed"], doc["hand_id"], doc["advisor_on"]
         self.mode = doc.get("mode", "virtual")
         self.announce = None
@@ -603,7 +615,7 @@ class Table:
             base["legal"] = [card_str(c) for c in legal]
             base["illegal_reasons"] = {card_str(c): illegal_reason(view, c)
                                        for c in hand if c not in legal}
-            if self.advisor_on:
+            if self.coached(st.to_play):
                 base["advice"] = self._advice()
         return base
 
@@ -682,7 +694,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == "/api/undo":
                     t.undo()
                 elif path == "/api/advisor":
-                    t.set_advisor(body.get("on", True))
+                    t.set_advisor(body.get("on", True), body.get("seat"))
                 elif path == "/api/resume":
                     t.resume()
                 else:

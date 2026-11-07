@@ -2,8 +2,10 @@
 /* The Table - front end. Vanilla JS, no dependencies. See apps/table/api_contract.py. */
 
 var MOCK_Q = new URLSearchParams(location.search).get("mock");
-var MOCK = MOCK_Q === "1" || MOCK_Q === "real";
-var MOCK_URL = MOCK_Q === "real" ? "/static/fixture_real.json" : "/static/fixture_state.json";
+var MOCK = MOCK_Q === "1" || MOCK_Q === "real" || MOCK_Q === "live" || MOCK_Q === "pass";
+var MOCK_URL = MOCK_Q === "real" ? "/static/fixture_real.json" :
+  (MOCK_Q === "live" ? "/static/fixture_live.json" :
+  (MOCK_Q === "pass" ? "/static/fixture_pass.json" : "/static/fixture_state.json"));
 var SEAT_LABELS = ["South", "West", "North", "East"];
 var SEAT_POS = ["bottom", "left", "top", "right"];
 var FALLBACK_KINDS = [
@@ -62,8 +64,31 @@ var setupDraft = {
   names: ["You", "West", "North", "East"],
   kinds: ["human", "search", "search", "search"],
   seed: "",
-  advisor: true
+  advisor: true,
+  coach: [true, false, false, false], /* per-seat "Coach" tick for keyboard humans */
+  preset: "solo",          /* "solo" | "live" | "pass" | null (edited by hand) */
+  leader: null             /* real mode: seat that holds 2c when no typed hand does */
 };
+var PRESETS = {
+  solo: {
+    label: "Solo vs bots",
+    text: "You at this keyboard (coach on) against three TallyHearts bots. The server deals.",
+    kinds: ["human", "search", "search", "search"], names: ["You", "West", "North", "East"], coach: [true, false, false, false]
+  },
+  live: {
+    label: "Live table",
+    text: "You sit at a real table with three people and real cards. You type in your 13 cards, enter each card the others play, and TallyHearts suggests yours.",
+    kinds: ["human", "table", "table", "table"], names: ["You", "West", "North", "East"], coach: [true, false, false, false]
+  },
+  pass: {
+    label: "Pass the laptop",
+    text: "Four people share this laptop. The server deals. Each player taps to see only their own hand. Coaching is on for seat 1 only unless you tick it.",
+    kinds: ["human", "human", "human", "human"], names: ["Player 1", "Player 2", "Player 3", "Player 4"], coach: [true, false, false, false]
+  }
+};
+var entryDraft = "";     /* text typed in the card box */
+var entryMsg = "";       /* inline message under the card box */
+var entryKey = "";       /* which prompt the box belongs to (cleared when the turn changes) */
 
 /* ---------- helpers ---------- */
 
@@ -155,6 +180,52 @@ function cardHTML(c, cls, extra) {
 function miniCard(c) {
   return '<span class="mini ' + (isRed(c[1]) ? "red" : "black") + '">' + cardLabel(c) + "</span>";
 }
+/* "7h", "Qs", "10d", "td", "7♥" -> "7h" / "Qs" / "Td"; null when unreadable */
+function parseTypedCard(text) {
+  var t = String(text || "").trim().toLowerCase().replace(/\s+/g, "");
+  var m = /^(10|[2-9tjqka])([cdsh\u2663\u2666\u2660\u2665])$/.exec(t);
+  if (!m) return null;
+  var suitMap = { "\u2663": "c", "\u2666": "d", "\u2660": "s", "\u2665": "h" };
+  var rank = m[1] === "10" ? "T" : m[1].toUpperCase();
+  return rank + (suitMap[m[2]] || m[2]);
+}
+function keyboardHumans() {
+  var n = 0;
+  ((state && state.seats) || []).forEach(function (x) { if (x.kind === "human") n++; });
+  return n;
+}
+function cardsHeldBy(seat) {
+  var n = 0;
+  rendered.forEach(function (p) { if (p.seat === seat) n++; });
+  return Math.max(0, 13 - n);
+}
+function miniLabel(c) { return '<span class="' + (isRed(c[1]) ? "red" : "black") + '">' + cardLabel(c) + "</span>"; }
+function pointsText(n) { return n + (n === 1 ? " point" : " points"); }
+
+/* What the tool is waiting for, as HTML for the status strip: {cls, html}. */
+function statusInfo() {
+  if (!state || state.phase === "setup") return { cls: "", html: "" };
+  if (state.phase === "over" && !isAnimating()) return { cls: "over", html: "Hand over. Start a new hand when you are ready." };
+  if (gather) {
+    var gp = rendered.slice(gTricks * 4, gTricks * 4 + 4);
+    if (gp.length === 4) return { cls: "trick", html: "Trick over: " + esc(seatName(trickWinner(gp))) + " took it (" + pointsText(trickPoints(gp)) + ")" };
+  }
+  if (isAnimating()) return { cls: "busy", html: "Cards are being played..." };
+  var tp = state.to_play, nm = esc(seatName(tp)), info = state.seats[tp] || {};
+  var lead = "";
+  if (state.last_trick && (state.current_trick || []).length === 0 && state.trick_number > 0) {
+    lead = "Trick over: " + esc(seatName(state.last_trick.winner)) + " took it (" + pointsText(state.last_trick.points) + "). ";
+  }
+  if (state.table_turn) return { cls: "wait", html: lead + "Waiting for " + nm + " to play (enter their card)" };
+  if (state.human_turn && !state.revealed) return { cls: "hidden", html: lead + "Waiting for " + nm + " to tap \u201cI\u2019m " + nm + ", show my hand\u201d" };
+  if (state.human_turn) {
+    var who = (state.mode === "real" || keyboardHumans() <= 1) && tp === 0 ? "Your turn" : nm + "\u2019s turn";
+    if (state.advice && state.advice.suggested) return { cls: "you", html: lead + who + " \u2014 TallyHearts suggests " + miniLabel(state.advice.suggested) };
+    return { cls: "you", html: lead + who + " \u2014 click or type the card played" };
+  }
+  return { cls: "busy", html: lead + nm + " (" + esc(KIND_LABEL[info.kind] || info.kind) + ") is playing..." };
+}
+
 function backCard() { return '<span class="card back" aria-hidden="true"></span>'; }
 
 /* ---------- network ---------- */
@@ -354,7 +425,7 @@ function act(path, body, after, opts) {
 /* ---------- rendering ---------- */
 
 function render() {
-  var key = JSON.stringify([view, state, busy, dismissedError, localError, setupDraft, announceBanner, flashDiv]);
+  var key = JSON.stringify([view, state, busy, dismissedError, localError, setupDraft, announceBanner, flashDiv, entryMsg, optimistic]);
   if (key === lastKey) return;
   lastKey = key;
   if (!isAnimating()) panelState = state;
@@ -366,7 +437,17 @@ function render() {
   var showSetup = view === "setup" || state.phase === "setup";
   var html = errorStrip();
   html += showSetup ? setupHTML() : gameHTML();
+  var keep = document.activeElement && document.activeElement.id === "card-entry";
   app.innerHTML = html;
+  focusEntry(keep);
+}
+
+/* The card box is the fastest way to transcribe: focus it whenever it is on screen. */
+function focusEntry() {
+  var el = document.getElementById("card-entry");
+  if (!el) return;
+  el.value = entryDraft;
+  try { el.focus({ preventScroll: true }); el.setSelectionRange(el.value.length, el.value.length); } catch (e) { /* ignore */ }
 }
 
 function errorStrip() {
@@ -413,7 +494,13 @@ function paramInputHTML(s) {
 function setupHTML() {
   if (setupDraft.step === "hands" && isRealSetup()) return handsEntryHTML();
   var real = isRealSetup();
-  var h = '<div class="setup"><h1>The Table</h1><p class="sub">Four seats, one deck. Choose who sits where.</p><div class="setup-card">';
+  var h = '<div class="setup"><h1>The Table</h1><p class="sub">Four seats, one deck. Pick a way to play, then adjust the seats if you like.</p><div class="setup-card">';
+  h += '<div class="presets" role="group" aria-label="Presets">';
+  ["solo", "live", "pass"].forEach(function (k) {
+    h += '<button type="button" class="btn preset' + (setupDraft.preset === k ? " on" : "") + '" data-act="preset" data-preset="' + k + '">' + esc(PRESETS[k].label) + "</button>";
+  });
+  h += "</div>";
+  h += '<p class="explain preset-text">' + (setupDraft.preset ? esc(PRESETS[setupDraft.preset].text) : "Custom seats.") + "</p>";
   for (var s = 0; s < 4; s++) {
     h += '<div class="setup-row"><span class="seat-tag">' + SEAT_LABELS[s] + '</span>' +
       '<input type="text" data-setup="name" data-seat="' + s + '" value="' + esc(setupDraft.names[s]) + '" maxlength="24" aria-label="Name for seat ' + s + '">' +
@@ -421,19 +508,53 @@ function setupHTML() {
     kinds.forEach(function (k) {
       h += '<option value="' + esc(k.kind) + '"' + (setupDraft.kinds[s] === k.kind ? " selected" : "") + ">" + esc(k.label) + "</option>";
     });
-    h += "</select>" + paramInputHTML(s) + "</div>";
+    h += "</select>" + paramInputHTML(s);
+    if (setupDraft.kinds[s] === "human") {
+      h += '<label class="coach"><input type="checkbox" data-setup="coach" data-seat="' + s + '"' + (setupDraft.coach[s] ? " checked" : "") + "> Coach</label>";
+    }
+    h += "</div>";
   }
-  h += '<p class="explain">Virtual: the server deals. Real table: at least one seat is ‘Human at the table’; type in every other seat’s 13 cards, then transcribe the table players’ cards as they fall.</p>';
-  h += '<div class="setup-row"><span class="seat-tag">Seed</span>' +
+  h += '<p class="explain">Virtual: the server deals. Real table: at least one seat is \u2018Human at the table\u2019; type in every other seat\u2019s 13 cards, then enter the table players\u2019 cards as they fall. Coach: show TallyHearts\u2019s advice to that keyboard player.</p>';
+  h += '<div class="setup-row seed-row"><span class="seat-tag">Seed</span>' +
     '<input type="text" inputmode="numeric" data-setup="seed" value="' + esc(setupDraft.seed) + '" placeholder="optional (random if empty)">' +
     "</div>" +
-    '<label class="check"><input type="checkbox" data-setup="advisor"' + (setupDraft.advisor ? " checked" : "") + "> Advisor on</label>" +
+    '<label class="check"><input type="checkbox" data-setup="advisor"' + (setupDraft.advisor ? " checked" : "") + "> Advisor on (master switch)</label>" +
     '<div class="setup-actions">' +
     (state && state.phase !== "setup" ? '<button type="button" class="btn ghost" data-act="cancel-setup">Back to table</button>' : "") +
-    '<button type="button" class="btn primary" data-act="deal"' + (busy ? " disabled" : "") + ">" + (real ? "Start real-table hand" : "Deal") + "</button></div>" +
-    '<p class="hint">' + (busy ? "Dealing..." : (real ? "You will enter the cards of every non-table seat next." : "Bots play until the first human must act.")) + "</p>" +
+    '<button type="button" class="btn primary" data-act="deal"' + (busy ? " disabled" : "") + ">" + (real ? "Next: enter your cards" : "Deal") + "</button></div>" +
+    '<p class="hint">' + (busy ? "Dealing..." : (real ? "You will enter the cards of every non-table seat next." : (setupDraft.preset === "pass" ? "Each player's hand stays hidden until they tap to show it." : "Bots play until the first human must act."))) + "</p>" +
     "</div></div>";
   return h;
+}
+
+function applyPreset(k) {
+  var p = PRESETS[k];
+  if (!p) return;
+  setupDraft.preset = k;
+  setupDraft.kinds = p.kinds.slice();
+  setupDraft.names = p.names.slice();
+  setupDraft.coach = p.coach.slice();
+  setupDraft.params = ["", "", "", ""];
+  setupDraft.hands = { 0: [], 1: [], 2: [], 3: [] };
+  setupDraft.leader = null;
+  setupDraft.step = "seats";
+}
+
+/* Real mode: which known (non-table) seat holds 2c in the typed hands, or -1. */
+function twoClubsHolder() {
+  for (var s = 0; s < 4; s++) {
+    if (setupDraft.kinds[s] !== "table" && setupDraft.hands[s].indexOf("2c") >= 0) return s;
+  }
+  return -1;
+}
+/* The effective leader: the 2c holder, else the chosen table seat, else the lone table seat, else -1. */
+function effectiveLeader() {
+  var h = twoClubsHolder();
+  if (h >= 0) return h;
+  var tbl = tableSeats();
+  if (tbl.length === 1) return tbl[0];
+  if (setupDraft.leader !== null && tbl.indexOf(setupDraft.leader) >= 0) return setupDraft.leader;
+  return -1;
 }
 
 var GRID_SUITS_PICK = ["s", "h", "c", "d"];
@@ -458,7 +579,10 @@ function pickedBy(c) {
 }
 function handsEntryHTML() {
   var tbl = tableSeats();
-  var h = '<div class="setup hands-entry"><h1>Real table: enter the hands</h1><p class="sub">For each seat that is not at the real table, click exactly 13 cards. A card chosen for one seat is greyed out for the others.</p>';
+  var onlyYou = setupDraft.preset === "live" && tbl.length === 3;
+  var h = '<div class="setup hands-entry"><h1>' + (onlyYou ? "Enter your 13 cards" : "Real table: enter the hands") + '</h1><p class="sub">' +
+    (onlyYou ? "Click the 13 cards you were dealt. The other three hands stay unknown, as in real life."
+      : "For each seat that is not at the real table, click exactly 13 cards. A card chosen for one seat is greyed out for the others.") + "</p>";
   var all = true;
   for (var s = 0; s < 4; s++) {
     if (tbl.indexOf(s) >= 0) continue;
@@ -481,6 +605,22 @@ function handsEntryHTML() {
         attrs: function (c) { return 'data-hand-seat="' + s + '" data-pick="' + c + '"'; }
       }) + "</div>";
   }
+  var holder = twoClubsHolder();
+  h += '<div class="setup-card leader-card"><b>Who leads the first trick (holds 2\u2663)?</b> ';
+  if (holder >= 0) {
+    h += '<span class="leader-auto">' + esc(setupDraft.names[holder] || SEAT_LABELS[holder]) + " \u2014 the 2\u2663 is in " +
+      (holder === 0 && onlyYou ? "your" : esc(setupDraft.names[holder] || SEAT_LABELS[holder]) + "\u2019s") + " hand, so they lead.</span>";
+  } else {
+    h += '<select data-setup="leader" aria-label="Who leads the first trick">';
+    if (tbl.length > 1) h += '<option value=""' + (setupDraft.leader === null ? " selected" : "") + ">Choose who holds 2\u2663...</option>";
+    tbl.forEach(function (t) {
+      var sel = (setupDraft.leader === t || (tbl.length === 1)) ? " selected" : "";
+      h += '<option value="' + t + '"' + sel + ">" + esc(setupDraft.names[t] || SEAT_LABELS[t]) + "</option>";
+    });
+    h += "</select>";
+    if (all) h += ' <span class="muted">(you do not hold 2\u2663, so one of the table players does)</span>';
+  }
+  h += "</div>";
   h += '<div class="setup-actions"><button type="button" class="btn ghost" data-act="hands-back">Back</button>' +
     '<button type="button" class="btn primary" data-act="hands-go"' + (busy ? " disabled" : "") + ">" + (busy ? "Starting..." : "Start hand") + "</button></div>" +
     '<p class="hint">' + (all ? "All hands complete." : "Every non-table seat needs exactly 13 cards.") + "</p></div>";
@@ -494,6 +634,10 @@ function seatBoxHTML(s) {
   var h = '<div class="seat seat-' + SEAT_POS[s] + (turn || thinking === s ? " turn" : "") + (announceBanner && announceBanner.seat === s ? " announce" : "") + '">' +
     '<div class="seat-name">' + esc(info.name) + '<span class="badge kind-' + esc(info.kind) + '">' + esc(KIND_LABEL[info.kind] || info.kind) + "</span></div>" +
     '<div class="seat-pts"><b>' + dispScores()[s] + "</b> pts</div>";
+  if (info.kind === "table") {
+    var cnt = cardsHeldBy(s);
+    h += '<div class="seat-count" title="Cards this person still holds (13 minus the cards they have played)">' + cnt + (cnt === 1 ? " card" : " cards") + " left</div>";
+  }
   if (thinking === s) h += '<div class="seat-turn thinking" aria-label="thinking">&middot;&middot;&middot;</div>';
   else if (turn && !isAnimating()) h += '<div class="seat-turn">' + (info.is_human ? "your move" : (info.kind === "table" ? "plays at the table" : "thinking...")) + "</div>";
   return h + "</div>";
@@ -550,24 +694,28 @@ function handHTML() {
   var tp = dispToPlay();
   var name = tp !== null && tp !== undefined ? seatName(tp) : "";
   var left = Math.max(1, 13 - gTricks);
-  if (state.human_turn && !state.revealed) {
+  var hideNow = optimistic && keyboardHumans() > 1; /* never leave a hand on screen after the card is played */
+  if ((state.human_turn && !state.revealed) || (hideNow && state.human_turn)) {
     var n = anim ? left : Math.max(1, 13 - state.trick_number), backs = "";
     for (var i = 0; i < n; i++) backs += backCard();
     return '<div class="hand-wrap"><div class="hand hidden">' + backs + "</div>" +
-      (anim ? "" : '<button type="button" class="btn primary reveal" data-act="reveal"' + (busy ? " disabled" : "") +
-      ">Tap to reveal " + esc(name) + "'s hand</button>") + "</div>";
+      (anim || !state.human_turn ? "" : '<button type="button" class="btn primary reveal" data-act="reveal"' + (busy ? " disabled" : "") +
+      ">I\u2019m " + esc(name) + ", show my hand</button>") + "</div>";
   }
   if (state.mode === "real" && state.table_turn && !anim) {
     var cand = {};
     (state.candidates || []).forEach(function (c) { cand[c] = true; });
     var nmT = seatName(state.to_play);
-    return '<div class="hand-wrap table-turn"><div class="hand-title">' + esc(nmT) + ' plays at the table \u2014 click the card they played</div>' +
+    return '<div class="hand-wrap table-turn"><div class="entry-prompt">' + esc(nmT) + ' played\u2026</div>' +
+      entryBoxHTML("Type their card, e.g. 7h, qs, 10d, td, then press Enter", "table:" + state.to_play + ":" + state.hand_id + ":" + (state.history || []).length) +
+      '<div class="hand-title">or click it</div>' +
       pickGridHTML({
         cls: function (c) { return cand[c] ? "cand" : ""; },
         disabled: function (c) { return !cand[c] || busy; },
         title: function (c) { return cand[c] ? "They played " + cardLabel(c) : "already played or held by a known seat"; },
         attrs: function (c) { return 'data-table-card="' + c + '"'; }
-      }) + "</div>";
+      }) + '<p class="entry-undo"><button type="button" class="btn small" data-act="undo"' + (busy ? " disabled" : "") + ">Undo last card</button> " +
+      '<span class="muted">entered the wrong card? take it back</span></p></div>';
   }
   if (!state.human_turn || !state.hand) {
     var m = anim ? left : Math.max(1, 13 - state.trick_number), b2 = "";
@@ -590,8 +738,55 @@ function handHTML() {
     else extra = 'aria-disabled="true" title="' + esc(reason) + '" data-reason="' + esc(reason) + '"';
     h += cardHTML(c, cls, extra);
   });
-  h += '</div><div class="caption" id="caption">' + (busy || anim ? "The table is playing..." : "&nbsp;") + "</div></div>";
-  return h;
+  h += '</div><div class="caption" id="caption">' + (busy || anim ? "The table is playing..." : "&nbsp;") + "</div>";
+  if (!anim) {
+    h += entryBoxHTML("Or type the card you play, e.g. 9d, then Enter", "own:" + state.to_play + ":" + state.hand_id + ":" + (state.history || []).length + ":" + (state.current_trick || []).length);
+  }
+  return h + "</div>";
+}
+
+function entryBoxHTML(placeholder, key) {
+  if (entryKey !== key) { entryKey = key; entryDraft = ""; entryMsg = ""; }
+  return '<div class="entry"><input id="card-entry" class="entry-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" ' +
+    'maxlength="6" value="' + esc(entryDraft) + '" placeholder="' + esc(placeholder) + '" aria-label="Card played">' +
+    '<button type="button" class="btn primary" data-act="entry-submit"' + (busy ? " disabled" : "") + '>Enter</button>' +
+    '<span id="entry-msg" class="entry-msg" role="alert">' + esc(entryMsg) + "</span></div>";
+}
+
+function entryError(msg) {
+  entryMsg = msg;
+  var m = document.getElementById("entry-msg");
+  if (m) m.textContent = msg; else { lastKey = null; render(); }
+}
+
+/* Validate typed text locally (no server round trip), then play it. */
+function submitEntry() {
+  if (!state || busy || isAnimating()) return;
+  var raw = entryDraft;
+  if (!String(raw).trim()) { entryError("Type a card first, like 7h or qs."); return; }
+  var c = parseTypedCard(raw);
+  if (!c) { entryError("\u201c" + raw.trim() + "\u201d is not a card. Use rank then suit: 7h, qs, 10d or td."); return; }
+  if (state.table_turn) {
+    if ((state.candidates || []).indexOf(c) < 0) {
+      entryError(cardLabel(c) + " cannot be " + seatName(state.to_play) + "\u2019s card now (already played, in a known hand, or it breaks the lead rules).");
+      return;
+    }
+    entryDraft = ""; entryMsg = "";
+    act("/api/play", { card: c });
+    return;
+  }
+  if (state.human_turn && state.hand) {
+    if (state.hand.indexOf(c) < 0 || rendered.some(function (p) { return p.card === c; })) {
+      entryError(cardLabel(c) + " is not in " + (state.to_play === 0 ? "your" : seatName(state.to_play) + "\u2019s") + " hand.");
+      return;
+    }
+    if ((state.legal || []).indexOf(c) < 0) {
+      entryError(cardLabel(c) + ": " + ((state.illegal_reasons && state.illegal_reasons[c]) || "not legal now") + ".");
+      return;
+    }
+    entryDraft = ""; entryMsg = "";
+    playCard(c);
+  }
 }
 
 function overHTML() {
@@ -610,7 +805,7 @@ function overHTML() {
 function controlsHTML() {
   var dis = busy ? " disabled" : "";
   return '<div class="controls">' +
-    '<button type="button" class="btn" data-act="undo"' + dis + ">Undo</button>" +
+    '<button type="button" class="btn" data-act="undo"' + dis + ' title="Take back the last card entered">Undo last card</button>' +
     '<button type="button" class="btn" data-act="new">New hand</button>' +
     '<button type="button" class="btn" data-act="resume"' + dis + ">Resume</button>" +
     '<button type="button" class="btn toggle' + (state.advisor_on ? " on" : "") + '" data-act="advisor"' + dis + ">Advisor: " + (state.advisor_on ? "on" : "off") + "</button>" +
@@ -623,7 +818,8 @@ function advisorHTML(ps) {
   var cands = a.candidates || [];
   var max = 0;
   cands.forEach(function (c) { if (c.mean_points > max) max = c.mean_points; });
-  var h = '<section class="panel advisor"><h3>Advisor</h3><p class="suggest">Suggested: ' + miniCard(a.suggested) + "</p>";
+  var h = '<section class="panel advisor"><h3>TallyHearts suggests</h3><div class="suggest-big">' + cardHTML(a.suggested, "static", 'tabindex="-1" disabled aria-label="Suggested card"') +
+    '<span class="suggest-note">play ' + miniCard(a.suggested) + "<br>lowest expected points</span></div>";
   cands.forEach(function (c) {
     var w = max > 0 ? Math.max(3, (c.mean_points / max) * 100) : 3;
     h += '<div class="bar-row' + (c.card === a.suggested ? " best" : "") + '"><span class="bar-label">' + miniCard(c.card) + " " +
@@ -685,6 +881,8 @@ function gameHTML() {
     h += '<div class="announce-banner" role="status"><b>' + esc(announceBanner.name) + "</b> (bot) plays <b>" + miniCard(announceBanner.card) +
       "</b> \u2014 play it at the table for them</div>";
   }
+  var st = statusInfo();
+  h += '<div class="status-strip ' + st.cls + '" role="status" aria-live="polite">' + st.html + "</div>";
   h += '<div class="layout"><main class="felt-col"><div class="felt">';
   var broken = settledInSync() ? state.hearts_broken : rendered.some(function (p) { return p.card[1] === "h"; });
   var trickNo = anim ? Math.min(13, gTricks + 1) : Math.min(13, state.trick_number + (state.phase === "over" ? 0 : 1));
@@ -695,6 +893,8 @@ function gameHTML() {
   h += handHTML() + "</div></main>";
   var ps = panelState;
   var stale = anim ? " stale" : "";
+  /* coaching panels only for the seat whose hand is on screen; never during a hidden hand or a hot-seat hand-over */
+  if ((state.human_turn && !state.revealed) || (keyboardHumans() > 1 && (anim || optimistic)) || (!anim && !state.advice)) ps = null;
   var adv = ps ? advisorHTML(ps) : "";
   if (adv) h += '<aside class="side' + stale + '">' + adv + "</aside>";
   var rea = ps ? reasoningHTML(ps) : "";
@@ -764,7 +964,10 @@ document.addEventListener("click", function (e) {
       if (perr) { localError = perr; lastKey = null; render(); break; }
       var body = {
         seats: [0, 1, 2, 3].map(function (s) {
-          return { kind: seatKindString(s), name: setupDraft.names[s].trim() || SEAT_LABELS[s] };
+          return {
+            kind: seatKindString(s), name: setupDraft.names[s].trim() || SEAT_LABELS[s],
+            advisor: setupDraft.kinds[s] === "human" ? !!setupDraft.coach[s] : false
+          };
         }),
         seed: sd.v,
         advisor_on: setupDraft.advisor
@@ -786,10 +989,15 @@ document.addEventListener("click", function (e) {
           hands[String(hs)] = hh.slice();
         }
         if (herr) { localError = herr; lastKey = null; render(); break; }
+        var ld = effectiveLeader();
+        if (ld < 0) { localError = "Choose who leads the first trick (who holds 2\u2663)."; lastKey = null; render(); break; }
         body.hands = hands;
+        body.leader = ld;
       }
       act("/api/new", body, function () { view = "auto"; setupDraft.step = "seats"; }, { fresh: true });
       break;
+    case "preset": applyPreset(btn.getAttribute("data-preset")); localError = null; lastKey = null; render(); break;
+    case "entry-submit": submitEntry(); break;
     case "hands-back": setupDraft.step = "seats"; localError = null; lastKey = null; render(); break;
     case "clear-hand":
       setupDraft.hands[parseInt(btn.getAttribute("data-seat"), 10)] = [];
@@ -803,11 +1011,20 @@ document.addEventListener("click", function (e) {
 });
 
 document.addEventListener("input", function (e) {
-  var t = e.target, kind = t.getAttribute && t.getAttribute("data-setup");
+  var t = e.target;
+  if (t && t.id === "card-entry") { entryDraft = t.value; if (entryMsg) { entryMsg = ""; var m = document.getElementById("entry-msg"); if (m) m.textContent = ""; } return; }
+  var kind = t.getAttribute && t.getAttribute("data-setup");
   if (!kind) return;
   var s = parseInt(t.getAttribute("data-seat"), 10);
   if (kind === "name") setupDraft.names[s] = t.value;
+  else if (kind === "leader") {
+    setupDraft.leader = t.value === "" ? null : parseInt(t.value, 10);
+    redraw();
+    return;
+  }
+  else if (kind === "coach") setupDraft.coach[s] = t.checked;
   else if (kind === "kind") {
+    setupDraft.preset = null;
     setupDraft.kinds[s] = t.value;
     setupDraft.params[s] = paramDefault(t.value);
     redraw(); /* the param input and the Deal button label depend on the kinds */
@@ -817,6 +1034,20 @@ document.addEventListener("input", function (e) {
   else if (kind === "seed") setupDraft.seed = t.value;
   else if (kind === "advisor") setupDraft.advisor = t.checked;
   lastKey = null; // draft changed; next render must not be skipped, but we do not re-render now (keeps focus)
+});
+
+document.addEventListener("keydown", function (e) {
+  var t = e.target;
+  if (t && t.id === "card-entry") {
+    if (e.key === "Enter") { e.preventDefault(); entryDraft = t.value; submitEntry(); }
+    else if (e.key === "Escape") { e.preventDefault(); entryDraft = ""; entryMsg = ""; t.value = ""; var m = document.getElementById("entry-msg"); if (m) m.textContent = ""; }
+    return;
+  }
+  /* typing a card with nothing focused jumps into the card box */
+  if (e.ctrlKey || e.metaKey || e.altKey || !e.key || e.key.length !== 1) return;
+  if (t && /^(input|textarea|select)$/i.test(t.tagName || "")) return;
+  var box = document.getElementById("card-entry");
+  if (box) { box.focus(); }
 });
 
 document.addEventListener("mouseover", function (e) {

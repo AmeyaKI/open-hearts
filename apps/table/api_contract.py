@@ -123,3 +123,27 @@ CARD_SUITS = "cdsh"
 # one line is appended to <results_dir>/table_divergence.txt:
 #   hand_id seed seat trick suggested played mean_suggested mean_played
 # and state carries "divergences": int (count this hand).
+
+# ---------------------------------------------------------------------------------------
+# V2 ADDITIONS (2026-11-06): per-seat coaching, presets, live-table flow.
+#
+# PER-SEAT ADVISOR. Each seat object sent to /api/new may carry "advisor": bool (default:
+# true for seat 0, false for every other human seat). A keyboard human gets advice only when
+# BOTH the global advisor_on and their seat's advisor flag are true. The state's "seats"
+# entries echo "advisor". POST /api/advisor {"on": bool} still toggles the global switch;
+# POST /api/advisor {"seat": s, "on": bool} toggles one seat.
+#
+# LEADER. In real mode, /api/new accepts "leader": seat index = who holds 2c and leads the
+# first trick. Required whenever no typed-in hand holds 2c (i.e. a table player leads);
+# the page asks "Who leads?" in that case.
+#
+# PRESETS (page-side only; the server sees ordinary seats):
+#   "Solo vs bots"       you (keyboard, advised) + three bots
+#   "Live table"         you (keyboard, advised; you type your 13 cards) + three "table" seats:
+#                        the other people play real cards in front of you and you enter each
+#                        card as it falls; TallyHearts suggests yours; you play it physically
+#   "Pass the laptop"    four keyboard humans, server deals, hands hidden until a reveal tap,
+#                        coaching off for everyone but seat 0 unless ticked per seat
+#
+# TYPED ENTRY. On a table seat's turn (and for a keyboard human's own play) the page accepts
+# typing a card such as "7h", "Qs", "10d"/"Td" followed by Enter, as well as clicking.
