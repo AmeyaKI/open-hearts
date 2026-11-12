@@ -647,6 +647,39 @@ Paired changes in the ISMCTS seats' score from rung to rung (a higher score is w
 
 **Limits.** Rungs 2 and 3 ran at the tuned exploration constant, which rung 1 showed to be worse than the stock value under random rollouts, so the strongest fair opponent may be slightly stronger than measured; a follow-up at the stock value is planned and has not been run. The wall-clock matches drifted in the opponent's favour by 21% (rung 2), 5% (rung 3) and 15% (rung 3e). The comparison covers one seating, one variant and one machine. TallyHearts ran on the unfused path in this harness, which makes decisions bitwise-identical to the shipped fused bot.
 
+## The browser table (November 2026)
+
+This section records a build, not an experiment. No benchmark was run for it and no number elsewhere in this log changes.
+
+### A playable table and advisor (2026-11-03 to 2026-11-11)
+
+**Why.** Every result above comes from matches between programs. The project has no results against people, and until now it had no practical way to collect any: the only interface was a text relay in a terminal. A table that people can sit at is the precondition for that work. It also makes TallyHearts's reasoning inspectable one card at a time, which the result tables cannot do.
+
+**What was built.** `apps/table/` holds a local web server written with the Python standard library only (`server.py`) and a single page of plain HTML, CSS and JavaScript (`static/`). Each of the four seats can be a person or a bot, in any mix. Three presets cover the common cases:
+
+| Preset | Seats | What the server knows |
+|---|---|---|
+| Solo vs bots | One person at the keyboard, three bots | Every hand, as dealer; each seat still sees only its own |
+| Live table | One person using the tool at a real table with three other people and real cards | Only the user's own hand, typed in; other players' cards are entered as they fall |
+| Pass the laptop | Up to four people sharing one screen | Every hand, as dealer; each hand stays hidden until its player reveals it |
+
+The bots that can be seated are TallyHearts, the beginner heuristic, a random player, the 200 training experts from the September population and randomly drawn personalities.
+
+**The advisor.** On a coached seat's turn, TallyHearts at the shipped configuration (50 worlds × 20 re-samples) suggests a card and shows its expected points for every legal play, so the player can see how close the alternatives are. Coaching is a per-seat setting.
+
+**The reasoning panel.** A 13-rank grid shows the probability that each opponent holds each unseen card, with known voids hatched out. Below it, up to six plain-language sentences explain the suggestion: which opponents are out of which suit and the trick that revealed it, where the queen of spades is likely to be, whether to duck or win a trick, which leads are safe, when hearts were broken and how many points are still out. The sentences come from fixed templates in `apps/table/explain.py`. Every number in them is computed from the belief table or from the search's own per-candidate averages. No language model is involved, so the panel cannot say anything the search did not compute.
+
+**Rules carried over from the research code.**
+
+- *No peeking.* Every seat, human or bot, receives only the same filtered view of the game that the benchmarks use. In the live-table preset the server never learns the other players' hands at all. When a card is entered for one of those players, the server accepts any card that player could legally hold and play given what has been seen, so a true play is never rejected.
+- *Replayable hands.* Bots are seeded from the hand's seed, and undo restores their random streams, so a hand replays exactly. State is saved after every play and a hand can be resumed part-way. Finished hands are stored as complete game records in the same format the benchmark harness writes.
+- *The held-out exam stays sealed.* The 50 held-out experts are refused as seats. Only the 200 training experts can be played against, so the September exam remains a test against opponents nobody has seen play.
+- *A record of disagreements.* Each time a coached player at the keyboard plays a different card from the suggestion, the server logs the suggested card, the card played and the expected points of both. The log is kept on the local machine and is not part of the repository. It is raw material for a later look at where people and the advisor part ways.
+
+**Tests.** 17 server tests and 36 explanation tests (`tests/test_table_server.py`, `tests/test_table_explain.py`). The table calls the existing player, belief table and search without modifying them, so every benchmark number in this log stands unchanged.
+
+**Status and limits.** No human-play data has been collected. A first hand at a real table is planned and has not been played. The table plays the same no-pass, no-moon variant as every benchmark. The expected points shown are averages over sampled worlds: estimates, not guarantees. The server holds one table and is meant to run on the player's own machine.
+
 ## Known limitations
 
 Stated plainly, not hidden:
