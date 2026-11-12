@@ -10,9 +10,13 @@ results/
 # agent-context docs, local-only
 info/
 TODO
-# C++ backend (Track C): build tree and compiled extension modules
-cpp/build/
+# C++ backend: work in progress, kept local until it is ready to publish
+cpp/
+scripts/cpp_build.sh
+tests/test_cpp_gate.py
+src/openhearts/engine/backend.py
 *.so
 !docs/BENCHMARK_REGISTRY.md
+!experiments/README.md
 # external opponent checkouts + released weights (scripts/build_perilune.sh)
 external/

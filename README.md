@@ -1,81 +1,125 @@
 # open-hearts
 
-**A Hearts AI that beat the field's reference bot — by tracking exactly where every hidden card can be, then searching over realistic futures.**
+**TallyHearts is a Hearts AI you can play against, or sit beside as a coach, in your browser.** It tracks exactly where every hidden card can be, imagines a thousand ways the hand could finish, and shows you its reasoning card by card.
 
-Hearts is an imperfect-information card game: you never see the other players' hands. This engine keeps an exact, constraint-propagated probability table over every hidden card, updates it from hard evidence (a player who can't follow suit *provably* has none of that suit), samples concrete possible worlds from it, and picks the move that scores best across those futures.
+This repository holds the bot, the browser table, and the full research record behind it: every benchmark, every chart, and the experiments that failed.
 
-Everything is measured like a research paper: matched deals, paired statistics, confidence intervals, expectations pre-registered *before* every run — and the experiments that failed are published next to the ones that won.
+![The Table: TallyHearts suggests a card, with its point estimates and the belief grid behind them](docs/images/table-advisor.png)
 
-## Headline results
+## Contents
 
-Hearts deals 26 penalty points per hand among 4 players — **6.5 points/hand is break-even, lower is better.**
+- [Play it in two minutes](#play-it-in-two-minutes)
+- [What you can do at the table](#what-you-can-do-at-the-table)
+- [How TallyHearts thinks](#how-tallyhearts-thinks)
+- [How strong is it?](#how-strong-is-it)
+- [What is not claimed](#what-is-not-claimed)
+- [Engineering](#engineering)
+- [Repository map](#repository-map)
+- [Further reading](#further-reading)
 
-| Opponent | Us | Them | Verdict |
+## Play it in two minutes
+
+Requires Python 3.11 or newer.
+
+```bash
+git clone https://github.com/AmeyaKI/open-hearts.git
+cd open-hearts
+python -m venv .venv && source .venv/bin/activate
+pip install -e '.[dev]'
+python apps/table/server.py
+```
+
+Then open <http://127.0.0.1:8765/>. The server uses only the Python standard library and runs entirely on your machine.
+
+## What you can do at the table
+
+<img src="docs/images/table-setup.png" alt="Setup screen: three presets and four configurable seats" width="520">
+
+Every one of the four seats can be a person or a bot, in any mix. Three presets cover the common cases.
+
+| Preset | What it is for |
+|---|---|
+| **Solo vs bots** | You play at the keyboard against three bots, with TallyHearts coaching you. |
+| **Live table** | You are playing real cards with real people. Type in your own hand, enter each card as it falls, and get a suggestion on your turn. |
+| **Pass the laptop** | Up to four people share one screen. Each hand stays hidden until its player taps to reveal it. Coaching is a per-seat setting. |
+
+**The advisor.** On your turn TallyHearts suggests a card and shows its expected points for every legal play, so you can see how close the alternatives are.
+
+**The reasoning panel.** A grid shows the probability that each opponent holds each unseen card. Known voids are hatched out. Plain-language sentences explain what drove the suggestion, for example that an opponent is out of spades, or that the queen of spades is safest dumped on a trick someone else is winning.
+
+**Opponents you can seat.** TallyHearts itself, a beginner rulebook bot, a random player, 200 rule-based "expert" archetypes and randomly drawn personalities.
+
+**Also built in.** Undo, autosave and resume, typed card entry, a complete record of every finished hand, and a log of each time you overruled the advisor.
+
+| Live table: enter the cards other players put down | Pass the laptop: hands stay hidden between turns |
+|---|---|
+| ![Live table mode](docs/images/table-live.png) | ![Pass-the-laptop mode](docs/images/table-pass.png) |
+
+Prefer a terminal? `python experiments/relay.py --advise` gives the same advice in text form.
+
+## How TallyHearts thinks
+
+Hearts is a game of hidden information: you never see the other three hands. TallyHearts handles that in four steps.
+
+1. **Keep an exact belief table.** For every unseen card, it holds the probability that each opponent has it. When a player cannot follow suit, they provably hold none of that suit, and because hand sizes are fixed that certainty shifts probability across the whole table. The update is computed exactly, not estimated.
+2. **Sample possible worlds.** It deals out complete hidden hands that are consistent with everything seen so far.
+3. **Play each world forward.** For every card it could play, it plays the rest of the hand out in each imagined world.
+4. **Search honestly.** Inside each imagined future it re-samples the hidden cards as new information would appear, so it never plans as if it could see through the backs of the cards. A play that reveals information gets credit for revealing it.
+
+It then plays the card with the lowest average points. The shipped configuration imagines 50 worlds with 20 re-samples each and decides in about 0.03 seconds.
+
+## How strong is it?
+
+A hand of Hearts hands out 26 penalty points among four players, so **6.5 points per hand is break-even and lower is better.** All results are on a simplified variant with no passing round and no shooting the moon, with both sides playing identical rules.
+
+| Opponent | TallyHearts | Opponent | Result |
 |---|---|---|---|
-| **xinxin** — the field's reference Hearts bot for 25 years (Sturtevant), at its published research configuration | **6.11** | 6.89 | **Won by 0.78 pts/hand** (95% CI [0.64, 0.91], Wilcoxon z = −11.3) over 14,000 games on the research literature's duplicate-seating protocol — **while deciding ~9× faster** (0.027 s vs 0.25 s per move, measured same-machine) |
-| **OpenSpiel ISMCTS** (Google DeepMind's framework; generic untuned baseline, 1,000 simulations/move) | **4.70** | 7.10 | Won by 2.4 pts/hand over 1,000 matched deals — and the margin is **compute-robust**: raising the baseline's budget 10× (to ~50× our per-move cost) didn't close it |
-| 3 held-out synthetic opponents (never trained against) | **2.35** | — | Takes ~9% of each hand's points while three opponents split the rest |
-| **Exploitability** — a dedicated attacker built to beat our bot specifically | +0.20 pts/hand extra taken | — | The bot's own robustness, measured rather than assumed: a minor, quantified leak with a standing regression test |
+| **xinxin**, the long-standing reference Hearts program from the research literature, at its published configuration | **6.11** | 6.89 | Ahead by 0.78 points per hand (95% CI 0.64 to 0.91) over 14,000 games (1,000 deals in all 14 mixed seatings), while deciding about 9 times faster |
+| **OpenSpiel ISMCTS**, a stock, untuned general-purpose search baseline at 1,000 simulations per move | **4.70** | 7.10 | Ahead by 2.4 points per hand over 1,000 matched deals. Giving the baseline 10 times more simulations did not close the gap |
+| **OpenSpiel ISMCTS strengthened with Hearts knowledge**, built for this project from OpenSpiel's algorithm | | | Ahead by 1.10 points per hand (0.81 to 1.40) when the opponent had about 4 times the compute, and by 1.57 (1.29 to 1.86) at equal compute, over 500 matched deals |
+| **Held-out rule-based experts**, never trained against | **4.76** | | Three experts split the remaining points |
+| **A dedicated attacker** built to exploit TallyHearts specifically | | | Took an extra 0.20 points per hand (0.07 to 0.33): a small, measured leak |
 
-All results are on the no-pass / no-shoot-the-moon variant, both sides playing identical rules (verified per-decision by runtime legality tripwires — zero firings across 18,000+ games).
+Every comparison plays identical deals with seats rotated, and confidence intervals are bootstrapped over deals. The exact settings, sources, licenses, seeds and caveats for every opponent are in the [benchmark registry](docs/BENCHMARK_REGISTRY.md).
 
-## How it works, in one paragraph
+## What is not claimed
 
-When an opponent fails to follow suit, you learn something *exact*: they hold zero cards of that suit. Because hand sizes are fixed, that certainty ripples — probability mass moves between players and cards in a way that can be computed exactly (iterative proportional fitting over a 3-opponents × 52-cards table). The bot keeps that table exact at all times, samples complete hidden-hand arrangements from it, plays each imagined world forward, re-samples mid-future as new information would appear ("honest search" — so a move that *reveals* information gets credit for revealing it), and plays the card with the best average outcome.
+- **Not full Hearts yet.** There is no passing round and no shooting the moon. The xinxin result holds for this variant only. Full moon rules are planned.
+- **No human-play results.** The table is built for it, but no formal data against people has been collected.
+- **Opponent modelling did not pay.** Reading opponents' habits was worth roughly nothing against varied opponents, and a learned position evaluator lost to the exact simulator in every test. Both are written up alongside the wins.
 
 ## Engineering
 
-- **20–30× end-to-end speedup** from 52-bit bitboard game representation and numba JIT-compiled kernels — measured, not estimated, across matched deals. A further fused decision kernel adds 5.3×.
-- **Every optimization is provably safe:** each compiled kernel keeps its pure-Python reference implementation, tested and runnable (`OPENHEARTS_NO_JIT=1`), and deterministic paths are gated on **bitwise-identical** output before any speed number is quoted.
-- **Architectural information hygiene:** player code can only receive a filtered `PlayerView` — it is structurally impossible for a bot to peek at hidden hands, not merely tested-for.
-- **~17k lines** of Python across engine, inference, search, and evaluation; full test suite green in both JIT modes; a C++ backend port is in progress.
-- Scale, on one laptop (M5 Max): 200,000 self-play games in ~2.5 minutes; a 14,000-game benchmark match in ~5 hours of checkpointed background compute.
+- **Fast.** A 52-bit bitboard game representation and numba-compiled kernels give a measured 20 to 30 times end-to-end speedup, and a fused decision kernel adds a further 5.3 times.
+- **Checked against a reference.** Every compiled kernel keeps its pure-Python reference implementation, and deterministic paths must produce bitwise-identical output before any speed figure is quoted. Run the reference paths with `OPENHEARTS_NO_JIT=1`.
+- **No peeking by construction.** Player code only ever receives a filtered view of the game. A bot cannot read hidden hands even by accident.
+- **Reproducible.** Experiments are seeded, checkpointed, and resumable. Expected outcomes were written down before each run and results are reported against them, misses included.
 
-## The method is the other half of the project
-
-- **Pre-registration:** every experiment's expected outcome is written down and frozen before the run; results are reported against the original wording — including the misses.
-- **Paired statistics:** every comparison plays identical deals with seats rotated, and confidence intervals bootstrap over deals. A built-in alarm (four identical players must average exactly 6.5) guards the whole harness.
-- **Published negatives:** a learned position evaluator lost to the exact simulator five different ways; opponent-modeling ("reading") was measured to be worth approximately nothing against noisy opponents — and the initial "reading actively hurts" result was itself diagnosed down to a statistics bug (importance-weight collapse), corrected, and re-reported. The nulls shaped the design as much as the wins.
-- **Adversarially reviewed claims:** benchmark wording is audited against what was actually measured — e.g. the xinxin win is stated for our rules variant, never inflated to full Hearts.
-
-## What this is and isn't
-
-**Is:** an evidence-first answer to "does exact belief tracking + honest search actually win?" — yes, against the strongest opponents obtainable: it beats the reference bot of the academic literature on that literature's own protocol, at a tenth of the decision cost.
-
-**Isn't (yet):** full Hearts (no passing round, no moon-shooting — both sides play the same simplified rules), or tested against humans (a live-play relay is built and waiting). Both are on the roadmap, tracked with the same discipline.
-
-**Full detail:** every phase, experiment, chart, null result, and all 22 numbered limitations live in **[docs/RESEARCH_LOG.md](docs/RESEARCH_LOG.md)** — the complete research chronicle this page summarizes.
-
-## Quick start
+Run the tests:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev]'
-python -m pytest -q                      # full suite
-OPENHEARTS_NO_JIT=1 python -m pytest -q  # same suite on the pure-Python reference paths
-```
-
-The bot is called **TallyHearts**. Play against it in your browser -- any mix of humans and bots at one table, with the bot's
-suggested card, its per-card point estimates and the belief heat-map it is working from:
-
-```bash
-python apps/table/server.py            # then open http://127.0.0.1:8765/
-```
-
-Or use it as an advisor at a real table from the terminal:
-
-```bash
-python experiments/relay.py --advise   # bot suggests, you play
+python -m pytest -q                      # compiled paths
+OPENHEARTS_NO_JIT=1 python -m pytest -q  # pure-Python reference paths
 ```
 
 ## Repository map
 
 | Path | What lives there |
 |---|---|
-| `src/openhearts/engine/` | Bitboard game engine + numba kernels (pure-Python references retained) |
-| `src/openhearts/belief/` | The exact belief table (constraint propagation, IPF rebalancing) |
-| `src/openhearts/sampler/` | Constraint-respecting hidden-hand sampling |
-| `src/openhearts/search/` | Honest (re-determinizing) Monte Carlo search — the champion bot |
-| `experiments/` | Every benchmark and experiment, reproducible by seed |
-| `docs/` | Charts + [the full research log](docs/RESEARCH_LOG.md) |
-| `cpp/` | C++ backend port (in progress) |
+| [`apps/table/`](apps/table) | The browser table: local server, page, and the plain-language explanations |
+| [`src/openhearts/engine/`](src/openhearts/engine) | Game engine and compiled kernels, with pure-Python references |
+| [`src/openhearts/belief/`](src/openhearts/belief) | The exact belief table |
+| [`src/openhearts/sampler/`](src/openhearts/sampler) | Sampling of hidden hands that respect every known constraint |
+| [`src/openhearts/search/`](src/openhearts/search) | Honest search: the TallyHearts player |
+| [`src/openhearts/players/`](src/openhearts/players) | Rule-based players, expert archetypes and personalities |
+| [`src/openhearts/opponent/`](src/openhearts/opponent), [`value/`](src/openhearts/value) | The learned opponent profiler and position evaluator (both null results, kept for the record) |
+| [`src/openhearts/eval/`](src/openhearts/eval) | Match harness, paired statistics and seeding |
+| [`experiments/`](experiments) | Every benchmark and experiment, [indexed here](experiments/README.md) |
+| [`tests/`](tests) | Test suite, run in both compiled and reference modes |
+| [`docs/`](docs) | Research log, benchmark registry, charts and screenshots |
+
+## Further reading
+
+- **[Research log](docs/RESEARCH_LOG.md)**: the complete record, phase by phase, with every result table, chart, null result and known limitation.
+- **[Benchmark registry](docs/BENCHMARK_REGISTRY.md)**: every opponent, exactly how it was configured, and the approved wording for each result.
+- **[Experiments index](experiments/README.md)**: which script produced which result.
